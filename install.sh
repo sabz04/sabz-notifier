@@ -21,7 +21,7 @@ else
   SRC=""
 fi
 
-TOKEN=""; OWNER=""; MODE="light"; INTERVAL="25"
+TOKEN=""; OWNER=""; RECIPIENT=""; MODE="light"; INTERVAL="25"
 DO_SWAP=1; DO_START=1; ASSUME_YES=0; FORCE=0; UNINSTALL=0; QUIET=0
 
 if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
@@ -63,7 +63,9 @@ ${BD}sabz-notifier${N} — уведомления о новых сообщени
 
 ${BD}Ключи${N}
   --token TOKEN     токен бота от @BotFather
-  --owner NAME      твой telegram-username без @ (только он управляет ботом)
+  --owner NAME      кто управляет ботом: @username или числовой id
+  --recipient ID    кому слать уведомления: @username, @канал или id
+                    ${D}(по умолчанию — тот же, кто владелец)${N}
   --mode light      без браузера, ~25 МБ RAM  ${D}(по умолчанию)${N}
   --mode browser    свой браузер, вход один раз  ${D}(нужно >= 2 ГБ RAM)${N}
   --interval SEC    период опроса, по умолчанию ${INTERVAL}
@@ -90,6 +92,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --token) TOKEN="${2:-}"; shift 2;;
     --owner) OWNER="${2:-}"; shift 2;;
+    --recipient|--to) RECIPIENT="${2:-}"; shift 2;;
     --mode) MODE="${2:-}"; shift 2;;
     --interval) INTERVAL="${2:-}"; shift 2;;
     --no-swap) DO_SWAP=0; shift;;
@@ -173,11 +176,25 @@ fi
 if [ -z "$OWNER" ] && [ -f "$DIR/.env" ]; then
   OWNER="$(grep -E '^TG_OWNER=' "$DIR/.env" | cut -d= -f2- || true)"
 fi
+if [ -z "$RECIPIENT" ] && [ -f "$DIR/.env" ]; then
+  RECIPIENT="$(grep -E '^TG_RECIPIENT=' "$DIR/.env" | cut -d= -f2- || true)"
+fi
 if [ -z "$OWNER" ]; then
   can_ask || die "нужен --owner (запуск без терминала)"
-  OWNER="$(ask "  Твой telegram-username без @: ")"
+  OWNER="$(ask "  Кто управляет ботом (@username или id): ")"
 fi
 OWNER="${OWNER#@}"
+
+if [ -z "$RECIPIENT" ]; then
+  if can_ask; then
+    RECIPIENT="$(ask "  Кому слать уведомления (@username или id, Enter — себе): ")"
+  fi
+  [ -z "$RECIPIENT" ] && RECIPIENT="@${OWNER}"
+fi
+case "$RECIPIENT" in
+  ""|@*) ;;
+  *[!0-9-]*) RECIPIENT="@${RECIPIENT}";;
+esac
 
 case "$MODE" in light|browser) ;; *) die "--mode должен быть light или browser";; esac
 
@@ -201,7 +218,9 @@ if [ "$MODE" = "browser" ]; then PY_BIN="${DIR}/venv/bin/python3"
 else PY_BIN="/usr/bin/python3"; fi
 
 say ""
-say "  режим:     ${BD}${MODE}${N}   владелец: ${BD}@${OWNER}${N}   опрос: ${BD}${INTERVAL}с${N}"
+say "  режим:     ${BD}${MODE}${N}   опрос: ${BD}${INTERVAL}с${N}"
+say "  владелец:  ${BD}${OWNER}${N}"
+say "  получатель:${BD} ${RECIPIENT}${N}"
 say "  каталог:   ${DIR}"
 say "  память:    ${RAM_MB} МБ"
 say ""
@@ -266,6 +285,7 @@ umask 077
 cat > "$DIR/.env" <<EOF
 TG_TOKEN=${TOKEN}
 TG_OWNER=${OWNER}
+TG_RECIPIENT=${RECIPIENT}
 BOT_MODE=${MODE}
 BOT_DATA=${DIR}/data
 BOT_HEADLESS=$([ "$MODE" = "browser" ] && echo 1 || echo "")

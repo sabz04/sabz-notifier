@@ -47,7 +47,11 @@ CONFIG_PATH = os.path.join(DATA, "config.json")
 STATE_PATH = os.path.join(DATA, "state.json")
 
 TG_TOKEN = os.environ.get("TG_TOKEN", "")
-OWNER = os.environ.get("TG_OWNER", "sabzrr").lstrip("@").lower()
+# кто управляет ботом: @username или числовой id
+OWNER = os.environ.get("TG_OWNER", "").strip().lstrip("@").lower()
+# куда слать уведомления: @username, @канал или числовой id.
+# пусто — шлём туда, откуда владелец написал /start
+RECIPIENT = os.environ.get("TG_RECIPIENT", "").strip()
 TG_API = "https://api.telegram.org/bot%s/%s"
 
 
@@ -183,10 +187,33 @@ def esc(s):
     return html.escape(str(s if s is not None else ""), quote=False)
 
 
+def _norm_target(v):
+    """'@name' / 'name' / '-100123' -> то, что понимает Telegram."""
+    v = str(v).strip()
+    if not v:
+        return None
+    if v.lstrip("-").isdigit():
+        return int(v)
+    return v if v.startswith("@") else "@" + v
+
+
+def notify_target():
+    """Куда шлём уведомления: явный получатель важнее запомненного чата."""
+    return _norm_target(RECIPIENT) or cfg.get("chat_id")
+
+
+def is_owner(frm):
+    """Владелец задаётся как @username или как числовой id."""
+    if not OWNER:
+        return True
+    uname = (frm.get("username") or "").lower()
+    return uname == OWNER or str(frm.get("id")) == OWNER
+
+
 def send(text, preview=False, chat_id=None):
-    cid = chat_id or cfg.get("chat_id")
+    cid = chat_id or notify_target()
     if not cid:
-        log("send: chat_id неизвестен, пропускаю")
+        log("send: получатель неизвестен — напиши боту /start")
         return
     chunks = [text[i:i + 3900] for i in range(0, len(text), 3900)] or [""]
     for chunk in chunks:
@@ -1182,7 +1209,7 @@ def handle(msg):
     uname = (frm.get("username") or "").lower()
     chat_id = (msg.get("chat") or {}).get("id")
     text = (msg.get("text") or "").strip()
-    if uname != OWNER:
+    if not is_owner(frm):
         log("отклонён чужой пользователь: @%s (%s)" % (uname, frm.get("id")))
         return
     if cfg.get("chat_id") != chat_id:
@@ -1433,7 +1460,7 @@ def selfcheck():
     ok = True
     print("режим        : %s%s" % (MODE, " (headless)" if HEADLESS else ""))
     print("каталог      : %s" % DATA)
-    print("владелец     : @%s" % OWNER)
+    print("владелец     : %s" % (("@" + OWNER) if OWNER else "любой (не задан)"))
     if not TG_TOKEN:
         print("✗ TG_TOKEN не задан")
         return 1
@@ -1443,6 +1470,15 @@ def selfcheck():
     else:
         print("✗ Telegram   : %s" % str(r)[:160])
         ok = False
+    tgt = notify_target()
+    print("получатель   : %s" % (tgt if tgt else "не задан"))
+    if tgt:
+        rc = tg("getChat", chat_id=tgt)
+        if rc.get("ok"):
+            print("✓ получатель : доступен")
+        else:
+            print("! получатель : пока недоступен — он должен сам написать "
+                  "боту /start (Telegram не даёт писать первым)")
     try:
         os.makedirs(DATA, exist_ok=True)
         probe = os.path.join(DATA, ".writetest")
