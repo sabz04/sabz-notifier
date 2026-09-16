@@ -21,8 +21,9 @@ else
   SRC=""
 fi
 
-TOKEN=""; OWNER=""; RECIPIENT=""; MODE="light"; INTERVAL="25"
+TOKEN=""; OWNER=""; RECIPIENT=""; MODE="browser"; INTERVAL="25"
 DO_SWAP=1; DO_START=1; ASSUME_YES=0; FORCE=0; UNINSTALL=0; PURGE=0; QUIET=0; FRESH=0
+MODE_SET=0
 
 if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
   R=$'\e[31m'; G=$'\e[32m'; Y=$'\e[33m'; B=$'\e[36m'; D=$'\e[2m'; N=$'\e[0m'; BD=$'\e[1m'
@@ -66,8 +67,10 @@ ${BD}Ключи${N}
   --owner NAME      кто управляет ботом: @username или числовой id
   --recipient ID    кому слать уведомления: @username, @канал или id
                     ${D}(по умолчанию — тот же, кто владелец)${N}
-  --mode light      без браузера, ~25 МБ RAM  ${D}(по умолчанию)${N}
-  --mode browser    свой браузер, вход один раз  ${D}(нужно >= 2 ГБ RAM)${N}
+  --mode browser    свой браузер, вход один раз  ${D}(по умолчанию)${N}
+                    ${D}ничего доставать не надо: логинишься один раз${N}
+  --mode light      без браузера, ~25 МБ RAM; доступ приносишь сам
+                    ${D}(cURL для Авито, токен для ВК)${N}
   --interval SEC    период опроса, по умолчанию ${INTERVAL}
   --no-swap         не создавать swap на машине с малой памятью
   --no-start        установить, но не запускать
@@ -84,7 +87,7 @@ ${BD}Ключи${N}
   -h, --help        эта справка
 
 ${BD}Примеры${N}
-  sudo ./install.sh --token 123:AA... --owner sabzrr --mode light -y
+  sudo ./install.sh --token 123:AA... --owner sabzrr -y
 
   ${D}# прямо с гитхаба, без клонирования:${N}
   curl -fsSL https://raw.githubusercontent.com/${GH_REPO}/${GH_BRANCH}/install.sh \\
@@ -97,7 +100,7 @@ while [ $# -gt 0 ]; do
     --token) TOKEN="${2:-}"; shift 2;;
     --owner) OWNER="${2:-}"; shift 2;;
     --recipient|--to) RECIPIENT="${2:-}"; shift 2;;
-    --mode) MODE="${2:-}"; shift 2;;
+    --mode) MODE="${2:-}"; MODE_SET=1; shift 2;;
     --interval) INTERVAL="${2:-}"; shift 2;;
     --no-swap) DO_SWAP=0; shift;;
     --no-start) DO_START=0; shift;;
@@ -204,6 +207,11 @@ fi
 if [ -z "$RECIPIENT" ] && [ -f "$DIR/.env" ]; then
   RECIPIENT="$(grep -E '^TG_RECIPIENT=' "$DIR/.env" | cut -d= -f2- || true)"
 fi
+# режим при обновлении не меняем молча: берём прежний, если не указан явно
+if [ "$MODE_SET" = "0" ] && [ -f "$DIR/.env" ]; then
+  _m="$(grep -E '^BOT_MODE=' "$DIR/.env" | cut -d= -f2- || true)"
+  case "$_m" in light|browser) MODE="$_m"; ok "режим взят из прежней установки: $MODE";; esac
+fi
 if [ -z "$OWNER" ]; then
   can_ask || die "нужен --owner (запуск без терминала)"
   say ""
@@ -245,22 +253,6 @@ case "$MODE" in light|browser) ;; *) die "--mode должен быть light и�
 
 RAM_MB=$(awk '/MemTotal/{printf "%d", $2/1024}' /proc/meminfo)
 SWAP_MB=$(awk '/SwapTotal/{printf "%d", $2/1024}' /proc/meminfo)
-# swap учитываем: с ним браузер живёт, пусть и медленнее
-EFFECTIVE_MB=$((RAM_MB + SWAP_MB))
-if [ "$MODE" = "browser" ]; then
-  if [ "$RAM_MB" -lt 1800 ] && [ "$EFFECTIVE_MB" -lt 2600 ] && [ "$FORCE" != "1" ]; then
-    warn "${RAM_MB} МБ RAM и ${SWAP_MB} МБ swap — браузеру мало."
-    warn "ставлю лёгкий режим. Нужен браузерный — запусти ещё раз с --force"
-    warn "(скрипт добавит swap, и со второго прохода браузерный пройдёт сам)."
-    MODE="light"
-  elif [ "$RAM_MB" -lt 1800 ]; then
-    warn "${RAM_MB} МБ RAM — браузер будет жить за счёт swap, ожидай медлительности."
-  fi
-fi
-
-PW_PATH="${DIR}/ms-playwright"
-if [ "$MODE" = "browser" ]; then PY_BIN="${DIR}/venv/bin/python3"
-else PY_BIN="/usr/bin/python3"; fi
 
 say ""
 say "  режим:     ${BD}${MODE}${N}   опрос: ${BD}${INTERVAL}с${N}"
@@ -314,6 +306,25 @@ else
     ok "создан swap 2 ГБ (/swapfile), подключён и прописан в fstab"
   fi
 fi
+
+# Режим решаем ЗДЕСЬ, а не раньше: swap уже создан и его надо учесть,
+# иначе на чистой машине браузерный режим откатывался бы зря.
+SWAP_MB=$(awk '/SwapTotal/{printf "%d", $2/1024}' /proc/meminfo)
+EFFECTIVE_MB=$((RAM_MB + SWAP_MB))
+if [ "$MODE" = "browser" ]; then
+  if [ "$EFFECTIVE_MB" -lt 1500 ] && [ "$FORCE" != "1" ]; then
+    warn "${RAM_MB} МБ RAM и ${SWAP_MB} МБ swap — браузер тут не выживет."
+    warn "ставлю лёгкий режим. Настоять можно ключом --force."
+    MODE="light"
+  elif [ "$RAM_MB" -lt 1800 ]; then
+    warn "${RAM_MB} МБ RAM — браузер будет жить за счёт swap (${SWAP_MB} МБ),"
+    warn "работать будет, но неспешно."
+  fi
+fi
+
+PW_PATH="${DIR}/ms-playwright"
+if [ "$MODE" = "browser" ]; then PY_BIN="${DIR}/venv/bin/python3"
+else PY_BIN="/usr/bin/python3"; fi
 
 # ------------------------------------------------------------- пользователь
 step "Пользователь и каталоги"
