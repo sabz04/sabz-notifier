@@ -147,8 +147,15 @@ if [ "$UNINSTALL" = "1" ] || [ "$PURGE" = "1" ]; then
     rm -f "$DIR"/bot.py "$DIR"/.env; ok "данные сохранены в ${DIR}/data"
   fi
   if [ "$PURGE" = "1" ]; then
-    userdel -r "$SVC_USER" 2>/dev/null || true
-    ok "пользователь ${SVC_USER} удалён"
+    pkill -u "$SVC_USER" 2>/dev/null || true
+    sleep 1
+    userdel -r "$SVC_USER" 2>/dev/null || userdel "$SVC_USER" 2>/dev/null || true
+    if getent passwd "$SVC_USER" >/dev/null 2>&1; then
+      warn "пользователя ${SVC_USER} удалить не удалось — убери вручную:"
+      warn "  userdel -r ${SVC_USER}"
+    else
+      ok "пользователь ${SVC_USER} удалён"
+    fi
     if grep -q '^/swapfile' /etc/fstab 2>/dev/null && [ -f /swapfile ]; then
       swapoff /swapfile 2>/dev/null || true
       sed -i '\#^/swapfile#d' /etc/fstab
