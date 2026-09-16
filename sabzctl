@@ -25,7 +25,6 @@ stray_kill() {
   return 0
 }
 
-mode() { grep -E '^BOT_MODE=' "$DIR/.env" 2>/dev/null | cut -d= -f2- || echo light; }
 envval() { grep -E "^$1=" "$DIR/.env" 2>/dev/null | cut -d= -f2- || true; }
 
 PY="${DIR}/venv/bin/python3"; [ -x "$PY" ] || PY="/usr/bin/python3"
@@ -46,7 +45,7 @@ ${BD}Или сразу командой${N}
   ${APP} ${BD}logs${N} [-f]         логи (-f — следить вживую)
   ${APP} ${BD}start${N} | ${BD}stop${N} | ${BD}restart${N}
   ${APP} ${BD}selfcheck${N}         проверить токен, доступы, каталоги
-  ${APP} ${BD}login${N}             войти в Авито/ВК ${D}(режим browser)${N}
+  ${APP} ${BD}login${N}             войти в Авито и ВК
   ${APP} ${BD}config${N}            показать настройки (токен скрыт)
   ${APP} ${BD}config${N} КЛЮЧ ЗНАЧ  изменить и перезапустить
   ${APP} ${BD}reconfigure${N}       спросить всё заново
@@ -58,7 +57,6 @@ ${BD}Ключи для config${N}
   token       токен бота от @BotFather
   owner       кто управляет: @username или id
   recipient   кому слать: @username, @канал или id
-  mode        light или browser
 
 ${BD}Примеры${N}
   ${APP} config recipient @sabzrr
@@ -83,7 +81,6 @@ key_of() {
     token|TG_TOKEN)             echo TG_TOKEN;;
     owner|TG_OWNER)             echo TG_OWNER;;
     recipient|to|TG_RECIPIENT)  echo TG_RECIPIENT;;
-    mode|BOT_MODE)              echo BOT_MODE;;
     *) echo "";;
   esac
 }
@@ -99,19 +96,13 @@ cmd_config() {
   need_root config
   [ $# -ge 2 ] || die "нужно: ${APP} config КЛЮЧ ЗНАЧЕНИЕ"
   local k; k="$(key_of "$1")"
-  [ -n "$k" ] || die "неизвестный ключ «$1» (token, owner, recipient, mode)"
+  [ -n "$k" ] || die "неизвестный ключ «$1» (token, owner, recipient)"
   local v="$2"
   case "$k" in
     TG_TOKEN)  [[ "$v" == *:* ]] || die "токен не похож на токен";;
     TG_OWNER)  v="${v#@}";;
     TG_RECIPIENT)
       case "$v" in ""|@*) ;; *[!0-9-]*) v="@${v}";; esac;;
-    BOT_MODE)
-      case "$v" in light|browser) ;; *) die "режим: light или browser";; esac
-      if [ "$v" = "browser" ] && [ ! -x "$DIR/venv/bin/python3" ]; then
-        die "для browser нужен браузер — переустанови: install.sh --mode browser"
-      fi
-      set_env BOT_HEADLESS "$([ "$v" = browser ] && echo 1 || echo "")";;
   esac
   set_env "$k" "$v"
   ok "${k} = ${v}"
@@ -135,8 +126,7 @@ menu_header() {
     line="${Y}○ остановлен${N}"
   fi
   printf '  %b\n' "$line"
-  printf '  %sрежим:%s %-8s %sполучатель:%s %s\n' \
-    "$D" "$N" "$(mode)" "$D" "$N" "$(envval TG_RECIPIENT)"
+  printf '  %sполучатель:%s %s\n' "$D" "$N" "$(envval TG_RECIPIENT)"
   printf '\n'
 }
 
@@ -150,8 +140,7 @@ menu_settings() {
     printf '    2  владелец     %s\n' "$(envval TG_OWNER)"
     printf '    3  токен        %sскрыт%s\n' "$D" "$N"
     printf '    4  период опроса\n'
-    printf '    5  режим        %s\n' "$(mode)"
-    printf '    6  показать всё\n'
+    printf '    5  показать всё\n'
     printf '    0  назад\n\n'
     printf '  > '; read -r c || return 0
     case "$c" in
@@ -163,9 +152,7 @@ menu_settings() {
          [ -n "${v:-}" ] && cmd_config token "$v"; pause;;
       4) printf '  Период опроса в секундах: '; read -r v || true
          if [ -n "${v:-}" ]; then set_interval "$v"; fi; pause;;
-      5) printf '  Режим (light/browser): '; read -r v || true
-         [ -n "${v:-}" ] && cmd_config mode "$v"; pause;;
-      6) cmd_config; pause;;
+      5) cmd_config; pause;;
       0|"") return 0;;
       *) warn "не понял";;
     esac
@@ -220,7 +207,7 @@ cmd_menu() {
     printf '    2  логи вживую\n'
     printf '    3  перезапустить\n'
     printf '    4  настройки\n'
-    [ "$(mode)" = "browser" ] && printf '    5  войти в Авито и ВК\n'
+    printf '    5  войти в Авито и ВК\n'
     printf '    9  удалить\n'
     printf '    0  выход\n\n'
     printf '  > '
@@ -231,7 +218,7 @@ cmd_menu() {
          journalctl -u "${APP}.service" -f -o cat || true;;
       3) need_root restart; systemctl restart "${APP}.service" && ok "перезапущен"; pause;;
       4) menu_settings;;
-      5) [ "$(mode)" = "browser" ] && cmd_login || warn "только в режиме browser"; pause;;
+      5) cmd_login; pause;;
       9) menu_delete;;
       0|"") printf '\n'; return 0;;
       *) warn "не понял";;
@@ -290,9 +277,8 @@ cmd_uninstall() {
 
 cmd_reconfigure() {
   need_root reconfigure
-  local cur_owner cur_rcp cur_mode a
+  local cur_owner cur_rcp a
   cur_owner="$(envval TG_OWNER)"; cur_rcp="$(envval TG_RECIPIENT)"
-  cur_mode="$(mode)"
   echo "  Enter — оставить как есть."
   echo
   read -r -p "  Токен бота [${D}скрыт${N}]: " a || true
@@ -318,7 +304,7 @@ cmd_status() {
   local mem; mem="$(systemctl show "${APP}.service" -p MemoryCurrent --value 2>/dev/null || echo 0)"
   case "$mem" in ''|*[!0-9]*) mem=0;; esac
   [ "$mem" -gt 0 ] && printf '  %sпамять:%s %s МБ\n' "$D" "$N" "$((mem/1048576))"
-  printf '  %sрежим:%s %s\n' "$D" "$N" "$(mode)"
+  printf '  %sполучатель:%s %s\n' "$D" "$N" "$(envval TG_RECIPIENT)"
   echo
   as_bot "$PY" "$DIR/bot.py" --selfcheck 2>&1 | sed 's/^/  /' || true
   echo
@@ -328,9 +314,8 @@ cmd_status() {
 
 cmd_login() {
   need_root login
-  [ "$(mode)" = "browser" ] || die "вход нужен только в режиме browser (сейчас: $(mode))"
-  command -v Xvfb >/dev/null || die "нет Xvfb — переустанови с --mode browser"
-  command -v websockify >/dev/null || die "нет websockify/novnc — переустанови с --mode browser"
+  command -v Xvfb >/dev/null || die "нет Xvfb — переустанови бота"
+  command -v websockify >/dev/null || die "нет websockify/novnc — переустанови бота"
 
   local NOVNC=/usr/share/novnc
   [ -d "$NOVNC" ] || NOVNC=/usr/share/webapps/novnc
@@ -367,12 +352,21 @@ cmd_login() {
   }
   trap cleanup EXIT INT TERM
 
+  # одноразовый пароль: порт открыт только пока идёт вход
+  VNCPW="$(tr -dc 'A-Za-z2-9' </dev/urandom | head -c 8)"
+  x11vnc -storepasswd "$VNCPW" "$tmp/vncpw" >/dev/null 2>&1
+  chmod 600 "$tmp/vncpw"
+
   Xvfb :99 -screen 0 1280x900x24 >/dev/null 2>&1 & X_PID=$!
   sleep 1
-  x11vnc -display :99 -localhost -nopw -forever -shared -quiet >/dev/null 2>&1 & VNC_PID=$!
+  x11vnc -display :99 -rfbauth "$tmp/vncpw" -forever -shared -quiet \
+    >/dev/null 2>&1 & VNC_PID=$!
   sleep 1
-  websockify --web="$NOVNC" 127.0.0.1:6080 127.0.0.1:5900 >/dev/null 2>&1 & WS_PID=$!
+  websockify --web="$NOVNC" 0.0.0.0:6080 127.0.0.1:5900 >/dev/null 2>&1 & WS_PID=$!
   sleep 1
+
+  IP="$(curl -fsS --max-time 8 https://api.ipify.org 2>/dev/null || true)"
+  [ -n "$IP" ] || IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
 
   cat > "$tmp/login.py" <<'PYEOF'
 import os
@@ -405,17 +399,23 @@ PYEOF
   for _ in $(seq 1 30); do grep -q BROWSER_READY "$tmp/out" 2>/dev/null && break; sleep 1; done
 
   echo
-  echo "  ${BD}Браузер запущен.${N} Открой его у себя так:"
+  echo "  ${BD}Браузер запущен.${N} Просто открой эту ссылку у себя:"
   echo
-  echo "    1) на своём компьютере выполни:"
-  echo "       ${BD}ssh -N -L 6080:127.0.0.1:6080 $(whoami)@$(hostname -I 2>/dev/null | awk '{print $1}')${N}"
-  echo "    2) открой в браузере:  ${BD}http://localhost:6080/vnc.html${N}"
-  echo "    3) залогинься во вкладках Авито и ВК"
+  echo "    ${BD}http://${IP}:6080/vnc.html?autoconnect=true&password=${VNCPW}${N}"
   echo
-  echo "  ${D}Порт наружу не торчит — только через твой SSH-туннель.${N}"
-  echo "  Когда закончишь — нажми ${BD}Ctrl+C${N} здесь."
+  echo "  Увидишь две вкладки — ${BD}Авито${N} и ${BD}ВК${N}. Залогинься в обеих."
+  echo "  Если Авито попросит подтвердить, что ты не робот — нажми кнопку там же."
   echo
-  while kill -0 "$PY_PID" 2>/dev/null; do sleep 2; done
+  echo "  ${D}Пароль одноразовый, порт открыт только сейчас и закроется,${N}"
+  echo "  ${D}как только ты нажмёшь Ctrl+C. Сам закроется через 30 минут.${N}"
+  echo
+  echo "  Закончил — ${BD}Ctrl+C${N} здесь, бот поднимется сам."
+  echo
+  local deadline=$((SECONDS + 1800))
+  while kill -0 "$PY_PID" 2>/dev/null; do
+    [ "$SECONDS" -ge "$deadline" ] && { echo; warn "30 минут прошло, закрываю доступ"; break; }
+    sleep 2
+  done
 }
 
 case "${1:-menu}" in

@@ -21,9 +21,9 @@ else
   SRC=""
 fi
 
-TOKEN=""; OWNER=""; RECIPIENT=""; MODE="browser"; INTERVAL="25"
+TOKEN=""; OWNER=""; RECIPIENT=""; INTERVAL="25"
 DO_SWAP=1; DO_START=1; ASSUME_YES=0; FORCE=0; UNINSTALL=0; PURGE=0; QUIET=0; FRESH=0
-MODE_SET=0
+DO_LOGIN=1
 
 if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
   R=$'\e[31m'; G=$'\e[32m'; Y=$'\e[33m'; B=$'\e[36m'; D=$'\e[2m'; N=$'\e[0m'; BD=$'\e[1m'
@@ -67,10 +67,7 @@ ${BD}Ключи${N}
   --owner NAME      кто управляет ботом: @username или числовой id
   --recipient ID    кому слать уведомления: @username, @канал или id
                     ${D}(по умолчанию — тот же, кто владелец)${N}
-  --mode browser    свой браузер, вход один раз  ${D}(по умолчанию)${N}
-                    ${D}ничего доставать не надо: логинишься один раз${N}
-  --mode light      без браузера, ~25 МБ RAM; доступ приносишь сам
-                    ${D}(cURL для Авито, токен для ВК)${N}
+  --no-login        не предлагать вход в Авито и ВК в конце
   --interval SEC    период опроса, по умолчанию ${INTERVAL}
   --no-swap         не создавать swap на машине с малой памятью
   --no-start        установить, но не запускать
@@ -100,10 +97,10 @@ while [ $# -gt 0 ]; do
     --token) TOKEN="${2:-}"; shift 2;;
     --owner) OWNER="${2:-}"; shift 2;;
     --recipient|--to) RECIPIENT="${2:-}"; shift 2;;
-    --mode) MODE="${2:-}"; MODE_SET=1; shift 2;;
     --interval) INTERVAL="${2:-}"; shift 2;;
     --no-swap) DO_SWAP=0; shift;;
     --no-start) DO_START=0; shift;;
+    --no-login) DO_LOGIN=0; shift;;
     --force) FORCE=1; shift;;
     -q|--quiet) QUIET=1; shift;;
     --repo) GH_REPO="${2:-}"; shift 2;;
@@ -214,11 +211,6 @@ fi
 if [ -z "$RECIPIENT" ] && [ -f "$DIR/.env" ]; then
   RECIPIENT="$(grep -E '^TG_RECIPIENT=' "$DIR/.env" | cut -d= -f2- || true)"
 fi
-# режим при обновлении не меняем молча: берём прежний, если не указан явно
-if [ "$MODE_SET" = "0" ] && [ -f "$DIR/.env" ]; then
-  _m="$(grep -E '^BOT_MODE=' "$DIR/.env" | cut -d= -f2- || true)"
-  case "$_m" in light|browser) MODE="$_m"; ok "режим взят из прежней установки: $MODE";; esac
-fi
 if [ -z "$OWNER" ]; then
   can_ask || die "нужен --owner (запуск без терминала)"
   say ""
@@ -256,13 +248,11 @@ else
   warn "Telegram не ответил на проверку токена — продолжаю, но проверь его"
 fi
 
-case "$MODE" in light|browser) ;; *) die "--mode должен быть light или browser";; esac
-
 RAM_MB=$(awk '/MemTotal/{printf "%d", $2/1024}' /proc/meminfo)
 SWAP_MB=$(awk '/SwapTotal/{printf "%d", $2/1024}' /proc/meminfo)
 
 say ""
-say "  режим:     ${BD}${MODE}${N}   опрос: ${BD}${INTERVAL}с${N}"
+say "  опрос:     ${BD}${INTERVAL}с${N}"
 say "  владелец:  ${BD}${OWNER}${N}"
 say "  получатель:${BD} ${RECIPIENT}${N}"
 say "  каталог:   ${DIR}"
@@ -277,8 +267,7 @@ fi
 step "Системные пакеты"
 if command -v apt-get >/dev/null 2>&1; then
   export DEBIAN_FRONTEND=noninteractive
-  PKGS="python3 ca-certificates"
-  [ "$MODE" = "browser" ] && PKGS="$PKGS python3-pip python3-venv xvfb x11vnc novnc websockify fonts-liberation"
+  PKGS="python3 ca-certificates python3-pip python3-venv xvfb x11vnc novnc websockify fonts-liberation curl"
   sub "обновляю список пакетов…"
   show apt-get update -q
   sub "ставлю: $PKGS"
@@ -314,24 +303,17 @@ else
   fi
 fi
 
-# Режим решаем ЗДЕСЬ, а не раньше: swap уже создан и его надо учесть,
-# иначе на чистой машине браузерный режим откатывался бы зря.
+# память проверяем после создания swap — он тоже считается
 SWAP_MB=$(awk '/SwapTotal/{printf "%d", $2/1024}' /proc/meminfo)
 EFFECTIVE_MB=$((RAM_MB + SWAP_MB))
-if [ "$MODE" = "browser" ]; then
-  if [ "$EFFECTIVE_MB" -lt 1500 ] && [ "$FORCE" != "1" ]; then
-    warn "${RAM_MB} МБ RAM и ${SWAP_MB} МБ swap — браузер тут не выживет."
-    warn "ставлю лёгкий режим. Настоять можно ключом --force."
-    MODE="light"
-  elif [ "$RAM_MB" -lt 1800 ]; then
-    warn "${RAM_MB} МБ RAM — браузер будет жить за счёт swap (${SWAP_MB} МБ),"
-    warn "работать будет, но неспешно."
-  fi
+if [ "$EFFECTIVE_MB" -lt 1500 ] && [ "$FORCE" != "1" ]; then
+  die "${RAM_MB} МБ RAM и ${SWAP_MB} МБ swap — браузер тут не выживет (--force, если уверен)"
+elif [ "$RAM_MB" -lt 1800 ]; then
+  warn "${RAM_MB} МБ RAM — браузер живёт за счёт swap (${SWAP_MB} МБ), будет неспешно"
 fi
 
 PW_PATH="${DIR}/ms-playwright"
-if [ "$MODE" = "browser" ]; then PY_BIN="${DIR}/venv/bin/python3"
-else PY_BIN="/usr/bin/python3"; fi
+PY_BIN="${DIR}/venv/bin/python3"
 
 # ------------------------------------------------------------- пользователь
 step "Пользователь и каталоги"
@@ -357,16 +339,14 @@ rm -rf "$DIR/__pycache__" 2>/dev/null || true
 
 step "Файлы бота"
 install -m 0644 -o "$SVC_USER" -g "$SVC_USER" "$SRC/bot.py" "$DIR/bot.py"
-PW_LINE=""
-[ "$MODE" = "browser" ] && PW_LINE="PLAYWRIGHT_BROWSERS_PATH=${PW_PATH}"
+PW_LINE="PLAYWRIGHT_BROWSERS_PATH=${PW_PATH}"
 umask 077
 cat > "$DIR/.env" <<EOF
 TG_TOKEN=${TOKEN}
 TG_OWNER=${OWNER}
 TG_RECIPIENT=${RECIPIENT}
-BOT_MODE=${MODE}
 BOT_DATA=${DIR}/data
-BOT_HEADLESS=$([ "$MODE" = "browser" ] && echo 1 || echo "")
+BOT_HEADLESS=1
 ${PW_LINE}
 PYTHONIOENCODING=utf-8
 EOF
@@ -375,8 +355,7 @@ chown -R "$SVC_USER":"$SVC_USER" "$DIR/data"
 ok "bot.py и .env на месте (.env читает только служба)"
 
 # ---------------------------------------------------------------- playwright
-if [ "$MODE" = "browser" ]; then
-  step "Браузер для бота"
+step "Браузер для бота"
 
   # своё окружение, чтобы не трогать системный python
   if [ ! -x "$PY_BIN" ]; then
@@ -431,14 +410,12 @@ PYEOF
   else
     warn "браузер не стартует. Последние строки:"
     tail -6 /tmp/pw_smoke.log 2>/dev/null | sed 's/^/      /'
-    die "останавливаюсь — режим browser не готов"
+    die "останавливаюсь — без рабочего браузера бот бесполезен"
   fi
-fi
 
 # ------------------------------------------------------------------ systemd
 step "Служба systemd"
-if [ "$MODE" = "browser" ]; then MEM_MAX="1400M"; MEM_HIGH="1100M"; CPUQ="80%"
-else MEM_MAX="200M"; MEM_HIGH="150M"; CPUQ="25%"; fi
+MEM_MAX="1400M"; MEM_HIGH="1100M"; CPUQ="80%"
 
 cat > "$UNIT" <<EOF
 [Unit]
@@ -503,32 +480,30 @@ fi
 say ""
 say "${G}${BD}  Готово.${N}"
 say ""
-say "  ${BD}Дальше:${N}"
+say "  ${BD}Осталось два шага:${N}"
 say "    1. Напиши боту в Telegram ${BD}/start${N} — он запомнит твой чат."
-if [ "$MODE" = "light" ]; then
-  say "    2. Дай доступ к мессенджерам:"
-  say "       ${BD}/vk${N}    — пришли cURL или токен ВК"
-  say "       ${BD}/avito${N} — пришли cURL страницы мессенджера Авито"
-  say "       ${D}cURL берётся так: F12 → Network → нужный запрос →${N}"
-  say "       ${D}правой кнопкой → Copy → Copy as cURL (bash)${N}"
-else
-  say "    2. Войди в аккаунты: ${BD}${APP} login${N} (откроет браузер через SSH-туннель)"
-fi
+say "    2. Войди в Авито и ВК — прямо сейчас, ниже."
 say ""
-say "  ${BD}Всё управление одной командой:${N}"
-say ""
-say "      ${BD}${APP}${N}"
-say ""
-say "  ${D}откроется меню: статус, логи, перезапуск, настройки, удаление${N}"
-say ""
-say "  ${BD}В Telegram:${N} /settings — настройки и что меняется прямо из чата"
+say "  ${BD}Управление:${N} команда ${BD}${APP}${N} — откроется меню"
+say "  ${D}статус, логи, перезапуск, настройки, вход, удаление${N}"
 say "  ${D}лог установки: ${LOG}${N}"
 say ""
-if [ "$MODE" = "light" ]; then
-  say "  ${Y}Важно:${N} Авито блокирует зарубежные дата-центры (HTTP 429)."
-  say "  Если сервер не в РФ — задай боту прокси: ${BD}/proxy avito http://user:pass@host:port${N}"
-  say ""
-fi
 say "  ${Y}Один токен — один бот.${N} Если он уже крутится на другой машине,"
 say "  останови там, иначе Telegram будет отдавать 409 обоим."
 say ""
+
+# ------------------------------------------------------------------ вход ---
+if [ "$DO_LOGIN" = "1" ] && [ "$DO_START" = "1" ] && [ -x "$CLI" ]; then
+  do_login="y"
+  if [ "$ASSUME_YES" != "1" ] && can_ask; then
+    a="$(ask "  Войти в Авито и ВК сейчас? [Y/n] ")"
+    case "${a:-y}" in [Nn]*) do_login="n";; esac
+  fi
+  if [ "$do_login" = "y" ]; then
+    say ""
+    "$CLI" login || warn "вход не удался — повтори позже: ${APP} login"
+  else
+    say "  ${D}Войти позже: ${APP} login${N}"
+    say ""
+  fi
+fi

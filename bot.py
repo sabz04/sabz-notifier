@@ -60,9 +60,6 @@ def _flag(name, default=""):
         not in ("", "0", "false", "no", "off")
 
 
-# light  — без браузера: куки/токен присылаются боту в Telegram
-# browser — свой профиль браузера, вход один раз
-MODE = (os.environ.get("BOT_MODE") or "browser").strip().lower()
 HEADLESS = _flag("BOT_HEADLESS")
 IS_WINDOWS = sys.platform.startswith("win")
 
@@ -242,274 +239,7 @@ def send(text, preview=False, chat_id=None):
 
 
 # ------------------------------------------------------------ curl parse ---
-_CURL_TOKEN = re.compile(
-    "'([^']*)'"
-    '|"((?:[^"\\\\]|\\\\.)*)"'
-    "|(\\S+)")
-
-_NO_ARG_FLAGS = {"--compressed", "-s", "--silent", "-i", "-k", "--insecure",
-                 "-l", "--location", "-g", "-v", "--verbose", "-f", "--fail"}
-_ARG_FLAGS = {"-a", "--user-agent", "-e", "--referer", "-u", "--user",
-              "--proxy", "-o", "--output", "--max-time", "--connect-timeout",
-              "-m", "--retry"}
-
-
-def parse_curl(text):
-    """Разбирает 'Copy as cURL' (bash и cmd) -> {url, method, headers, data}."""
-    text = text.strip()
-    text = re.sub(r"\^\r?\n", " ", text)
-    text = re.sub(r"\\\r?\n", " ", text)
-    text = re.sub(r"\s+", " ", text)
-    if text.lower().startswith("curl"):
-        text = text[4:]
-    toks = []
-    for m in _CURL_TOKEN.finditer(text):
-        if m.group(1) is not None:
-            toks.append(m.group(1))
-        elif m.group(2) is not None:
-            toks.append(m.group(2).replace('\\"', '"'))
-        else:
-            toks.append(m.group(3))
-    url = None
-    method = None
-    data = None
-    headers = {}
-    i = 0
-    while i < len(toks):
-        t = toks[i]
-        low = t.lower()
-        if low in ("-h", "--header") and i + 1 < len(toks):
-            i += 1
-            if ":" in toks[i]:
-                k, v = toks[i].split(":", 1)
-                headers[k.strip()] = v.strip()
-        elif low in ("-b", "--cookie") and i + 1 < len(toks):
-            i += 1
-            headers["Cookie"] = toks[i]
-        elif low in ("-x", "--request") and i + 1 < len(toks):
-            i += 1
-            method = toks[i].upper()
-        elif low in ("-d", "--data", "--data-raw", "--data-binary",
-                     "--data-urlencode") and i + 1 < len(toks):
-            i += 1
-            data = toks[i]
-        elif low in _NO_ARG_FLAGS:
-            pass
-        elif low in _ARG_FLAGS:
-            i += 1
-        elif t.startswith("http://") or t.startswith("https://"):
-            url = t
-        i += 1
-    for bad in ("Content-Length", "content-length", "Accept-Encoding",
-                "accept-encoding"):
-        headers.pop(bad, None)
-    if not url:
-        raise ValueError("в cURL не нашёл URL")
-    return {"url": url, "method": method or ("POST" if data else "GET"),
-            "headers": headers, "data": data}
-
-
-def cookie_domain(url):
-    try:
-        return urllib.parse.urlparse(url).netloc
-    except Exception:
-        return "?"
-
-
 # ------------------------------------------------------- generic message ---
-def _dig(o, *keys):
-    for k in keys:
-        if isinstance(o, dict) and k in o:
-            o = o[k]
-        else:
-            return None
-    return o
-
-
-def _text_of(content):
-    """Достаёт текст из content разных форм Avito."""
-    if content is None:
-        return ""
-    if isinstance(content, str):
-        return content
-    if isinstance(content, dict):
-        for k in ("text", "title", "body"):
-            v = content.get(k)
-            if isinstance(v, str) and v.strip():
-                return v
-        if "call" in content:
-            return "📞 звонок"
-        if "image" in content or "images" in content:
-            return "🖼 изображение"
-        if "location" in content:
-            return "📍 геолокация"
-        if "item" in content:
-            return "📦 объявление"
-        if "link" in content:
-            return _dig(content, "link", "text") or "🔗 ссылка"
-    return ""
-
-
-def _looks_like_chat(d):
-    if not isinstance(d, dict):
-        return False
-    if "last_message" in d or "lastMessage" in d:
-        return True
-    return "id" in d and "users" in d and isinstance(d.get("users"), list)
-
-
-def deep_find_chats(root, limit=400000):
-    """Ищет список чатов где угодно внутри дерева. Возвращает самый большой."""
-    best = None
-    stack = [root]
-    seen = 0
-    while stack and seen < limit:
-        node = stack.pop()
-        seen += 1
-        if isinstance(node, dict):
-            stack.extend(node.values())
-        elif isinstance(node, list):
-            if node and sum(1 for x in node[:10] if _looks_like_chat(x)) \
-                    >= max(1, min(len(node), 10) // 2):
-                if best is None or len(node) > len(best):
-                    best = node
-            else:
-                stack.extend(node)
-    return best
-
-
-_HTML_STATE_PATTERNS = (
-    # React Router SSR — то, что реально использует мессенджер Avito
-    r'window\.__staticRouterHydrationData\s*=\s*JSON\.parse\(\s*"((?:[^"\\]|\\.)*)"\s*\)',
-    r'window\.__staticRouterHydrationData\s*=\s*(\{.*?\})\s*;',
-    r'window\.__initialData__\s*=\s*"((?:[^"\\]|\\.)*)"',
-    r"window\.__initialData__\s*=\s*'((?:[^'\\]|\\.)*)'",
-    r'<script[^>]+id="__NEXT_DATA__"[^>]*>(.*?)</script>',
-    r'window\.__INITIAL_STATE__\s*=\s*(\{.*?\})\s*;?\s*</script>',
-    r'JSON\.parse\(\s*"((?:[^"\\]|\\.)*\\"(?:loaderData|chats)\\".*?)"\s*\)',
-)
-
-
-def _try_decode_state(blob):
-    """Раскодирует вшитое в HTML состояние в объект.
-
-    Кусок может быть: голым JSON, JS-строковым литералом с JSON внутри
-    (JSON.parse("...")), либо URL-кодированным JSON.
-    """
-    candidates = [blob]
-    try:
-        # содержимое строкового литерала: \" \\ \n \uXXXX разбираются по JSON
-        candidates.append(json.loads('"' + blob + '"'))
-    except Exception:
-        pass
-    for c in list(candidates):
-        if isinstance(c, str) and "%" in c:
-            try:
-                candidates.append(urllib.parse.unquote(c))
-            except Exception:
-                pass
-    for c in candidates:
-        if not isinstance(c, str):
-            continue
-        c = c.strip()
-        if not c:
-            continue
-        try:
-            obj = json.loads(c)
-        except Exception:
-            continue
-        if isinstance(obj, str):
-            try:
-                obj = json.loads(urllib.parse.unquote(obj))
-            except Exception:
-                continue
-        if isinstance(obj, (dict, list)):
-            return obj
-    return None
-
-
-def extract_state_from_html(text):
-    """Достаёт JSON-состояние из HTML-страницы мессенджера."""
-    for pat in _HTML_STATE_PATTERNS:
-        for m in re.finditer(pat, text, re.S):
-            obj = _try_decode_state(m.group(1))
-            if obj is not None:
-                return obj
-    return None
-
-
-def extract_avito_chats(js):
-    """Нормализует ответ chats-эндпоинта в список dict. None = не распознал."""
-    chats = None
-    if isinstance(js, dict):
-        for path in (("chats",), ("data", "chats"), ("result", "chats"),
-                     ("payload", "chats")):
-            v = _dig(js, *path)
-            if isinstance(v, list):
-                chats = v
-                break
-    if chats is None and isinstance(js, list) \
-            and any(_looks_like_chat(x) for x in js[:10]):
-        chats = js
-    if chats is None:
-        chats = deep_find_chats(js)
-    if chats is None:
-        return None
-    out = []
-    for c in chats:
-        if not isinstance(c, dict):
-            continue
-        lm = c.get("last_message") or c.get("lastMessage") or {}
-        if not isinstance(lm, dict):
-            lm = {}
-        users = c.get("users")
-        users = users if isinstance(users, list) else []
-        me = c.get("user_id") or c.get("self_id")
-        author_id = lm.get("author_id") or lm.get("authorId")
-        name = None
-        for u in users:
-            if isinstance(u, dict) and author_id is not None \
-                    and u.get("id") == author_id:
-                name = u.get("name") or _dig(u, "public_user_profile", "name")
-                break
-        if not name:
-            for u in users:
-                if isinstance(u, dict) and u.get("id") != me:
-                    name = u.get("name")
-                    break
-        ctx = c.get("context") or {}
-        item = _dig(ctx, "value") or {}
-        title = item.get("title") if isinstance(item, dict) else None
-        author = None
-        for u in users:
-            if isinstance(u, dict) and author_id is not None \
-                    and u.get("id") == author_id:
-                author = u
-                break
-        official = bool(
-            (author or {}).get("is_official")
-            or (author or {}).get("official")
-            or c.get("is_official")
-            or _dig(author or {}, "public_user_profile", "is_official"))
-        out.append({
-            "chat_id": str(c.get("id") or c.get("chat_id") or ""),
-            "msg_id": str(lm.get("id") or lm.get("created") or ""),
-            "author_id": str(author_id) if author_id is not None else "",
-            "self_id": str(me) if me is not None else "",
-            "name": name or "Собеседник",
-            "title": title or "",
-            "text": _text_of(lm.get("content") or lm.get("text")),
-            "created": lm.get("created") or 0,
-            "direction": lm.get("direction") or "",
-            "unread": c.get("unread_count") or c.get("unreadCount") or 0,
-            "msg_type": str(lm.get("type") or ""),
-            "chat_type": str(ctx.get("type") or "") if isinstance(ctx, dict) else "",
-            "official": official,
-        })
-    return out
-
-
-# Сообщения не от живых людей: сервис, автоответы, системные уведомления.
 SYSTEM_NAMES = (
     "авито", "avito", "служба поддержки", "поддержка", "техподдержка",
     "помощник", "ассистент", "бот", "модерац", "доставка авито",
@@ -540,80 +270,6 @@ def is_system_sender(m):
     return False
 
 
-def extract_vk_response(js):
-    """Находит тело ответа VK (response с items) в любом виде. None = нет."""
-    if not isinstance(js, dict):
-        return None
-    resp = js.get("response")
-    if isinstance(resp, dict) and isinstance(resp.get("items"), list):
-        return resp
-    if isinstance(js.get("items"), list):
-        return js
-    items = deep_find_chats(js)
-    if items is None:
-        return None
-    return {"items": items,
-            "profiles": js.get("profiles") or _dig(js, "response", "profiles") or [],
-            "groups": js.get("groups") or _dig(js, "response", "groups") or []}
-
-
-def map_vk_conversations(resp):
-    """Нормализует ответ messages.getConversations в общий вид."""
-    out = []
-    if not isinstance(resp, dict):
-        return out
-    names = {}
-    for p in (resp.get("profiles") or []):
-        if isinstance(p, dict) and "id" in p:
-            names[p["id"]] = ("%s %s" % (p.get("first_name", ""),
-                                         p.get("last_name", ""))).strip()
-    for g in (resp.get("groups") or []):
-        if isinstance(g, dict) and "id" in g:
-            names[-g["id"]] = g.get("name", "Сообщество")
-    for it in (resp.get("items") or []):
-        if not isinstance(it, dict):
-            continue
-        msg = it.get("last_message") or it.get("lastMessage") or {}
-        conv = it.get("conversation") or it
-        if not isinstance(msg, dict):
-            continue
-        peer = _dig(conv, "peer", "id")
-        if peer is None:
-            peer = msg.get("peer_id") or conv.get("id")
-        frm = msg.get("from_id")
-        text = msg.get("text") or ""
-        if not text:
-            att = msg.get("attachments") or []
-            if att and isinstance(att[0], dict):
-                text = "📎 вложение (%s)" % att[0].get("type", "?")
-            elif msg.get("action"):
-                text = "ℹ️ действие в беседе"
-        title = ""
-        if _dig(conv, "peer", "type") == "chat":
-            title = _dig(conv, "chat_settings", "title") or "Беседа"
-        out.append({
-            "chat_id": str(peer),
-            "msg_id": str(msg.get("id") or msg.get("conversation_message_id") or ""),
-            "author_id": str(frm) if frm is not None else "",
-            "self_id": "",
-            "name": names.get(frm) or ("ID %s" % frm),
-            "title": title,
-            "text": text,
-            "created": msg.get("date") or 0,
-            "direction": "out" if msg.get("out") else "in",
-            "unread": conv.get("unread_count") or 0,
-            "msg_type": "system" if msg.get("action") else "",
-            "chat_type": _dig(conv, "peer", "type") or "",
-            "official": False,
-        })
-    return out
-
-
-def looks_like_vk(url):
-    host = cookie_domain(url).lower()
-    return any(d in host for d in ("vk.com", "vk.ru", "vk.me", "userapi.com"))
-
-
 # --------------------------------------------------------------- errors ---
 class SessionDead(Exception):
     pass
@@ -624,21 +280,13 @@ class Blocked(Exception):
     pass
 
 
-_BLOCK_PAGE = re.compile(
-    r"Доступ ограничен|проблема с IP|не робот|Проверка безопасности", re.I)
-
-
 def blocked_hint():
-    """Что делать владельцу, чтобы снять проверку. Зависит от режима."""
-    if MODE == "browser":
-        return ("Проверку нужно пройти вручную в окне браузера бота — "
-                "открой его и нажми кнопку.\nНа сервере: "
-                "<code>sabz-notifier login</code>, дальше по SSH-туннелю.")
-    return ("Проверку нужно пройти <b>с того же IP, с которого ходит бот</b> — "
-            "домашний браузер тут не поможет.\nНа сервере: поставь режим "
-            "<code>browser</code> и пройди её через "
-            "<code>sabz-notifier login</code>, либо задай выход в РФ: "
-            "<code>/proxy avito http://user:pass@host:port</code>")
+    """Что делать владельцу, чтобы снять проверку «вы не робот»."""
+    return ("Проверку проходит человек, не бот. Открой браузер бота и нажми "
+            "кнопку: на сервере это <code>sabz-notifier login</code>, "
+            "дальше по ссылке, которую он покажет.\n\n"
+            "Важно: проходить надо с того же адреса, откуда ходит бот — "
+            "из домашнего браузера не поможет.")
 
 
 class Transient(Exception):
@@ -653,99 +301,6 @@ class Source(object):
 
     def st(self):
         return state.setdefault(self.name, {"seen": {}, "primed": False})
-
-
-class ReplaySource(Source):
-    """Повторяет запрос, скопированный из DevTools (Avito, VK и подобные)."""
-
-    def parser(self):
-        return self.conf.get("parser") or (
-            "vk" if looks_like_vk(self.conf["request"]["url"]) else "avito")
-
-    def poll(self):
-        r = self.conf["request"]
-        st, raw, _ = http(r["url"], headers=r["headers"],
-                          data=r.get("data"), method=r.get("method"),
-                          proxy=self.conf.get("proxy"), timeout=45)
-        if st in (401, 403):
-            raise SessionDead("HTTP %s — куки больше не действуют" % st)
-        if st == 429:
-            raise Blocked("HTTP 429 — Авито просит пройти проверку с этого IP")
-        if st >= 400:
-            raise Transient("HTTP %s" % st)
-        text = raw.decode("utf-8", "replace")
-        if _BLOCK_PAGE.search(text[:8000]):
-            raise Blocked("вместо данных пришла страница проверки Авито")
-        try:
-            body = json.loads(text)
-        except Exception:
-            body = extract_state_from_html(text)
-            if body is None:
-                low = text[:4000].lower()
-                if "login" in low or "вход" in low or "авториз" in low:
-                    raise SessionDead("вернулась страница входа — сессия истекла")
-                raise SessionDead("не нашёл данные в ответе (%d байт)" % len(raw))
-
-        if isinstance(body, dict) and isinstance(body.get("error"), dict):
-            e = body["error"]
-            code = e.get("error_code")
-            msg = e.get("error_msg") or e.get("error_descr") or ""
-            if code in (5, 27, 28) or "authoriz" in str(msg).lower():
-                raise SessionDead("доступ отозван (%s)" % msg)
-            if code in (6, 29):
-                raise Transient("лимит запросов")
-            raise Transient("ошибка %s: %s" % (code, msg))
-
-        if self.parser() == "vk":
-            resp = extract_vk_response(body)
-            if resp is None:
-                raise SessionDead("в ответе нет списка диалогов")
-            return map_vk_conversations(resp)
-        chats = extract_avito_chats(body)
-        if chats is None:
-            raise SessionDead("в ответе нет списка чатов")
-        return chats
-
-    def link(self, chat_id):
-        if self.parser() == "vk":
-            return "https://vk.com/im?sel=%s" % chat_id
-        host = cookie_domain(self.conf["request"]["url"])
-        if "avito" in host:
-            return "https://www.avito.ru/profile/messenger/channel/%s" % chat_id
-        return None
-
-
-class VkSource(Source):
-    """VK: последние диалоги через messages.getConversations."""
-    API = "https://api.vk.com/method/%s"
-    V = "5.199"
-
-    def call(self, method, **p):
-        p["access_token"] = self.conf["token"]
-        p["v"] = self.V
-        st, js, _ = http_json(
-            self.API % method, data=urllib.parse.urlencode(p),
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-            proxy=self.conf.get("proxy"), timeout=40)
-        if not isinstance(js, dict):
-            raise Transient("VK: ответ не JSON (HTTP %s)" % st)
-        if "error" in js:
-            e = js["error"]
-            code = e.get("error_code")
-            msg = e.get("error_msg", "")
-            if code in (5, 27, 28):
-                raise SessionDead("токен недействителен (%s)" % msg)
-            if code in (6, 29):
-                raise Transient("лимит запросов")
-            raise Transient("VK error %s: %s" % (code, msg))
-        return js.get("response")
-
-    def poll(self):
-        return map_vk_conversations(
-            self.call("messages.getConversations", count=30, extended=1))
-
-    def link(self, chat_id):
-        return "https://vk.com/im?sel=%s" % chat_id
 
 
 BROWSER_DIR = os.path.join(DATA, "browser")
@@ -1084,14 +639,9 @@ def render(src_name, m, url):
 
 
 def build_one(name, conf):
-    kind = conf.get("kind")
-    if kind == "browser":
-        if conf.get("site") == "vk":
-            return BrowserVkSource(name, conf)
-        return BrowserAvitoSource(name, conf)
-    if kind == "vk":
-        return VkSource(name, conf)
-    return ReplaySource(name, conf)
+    if conf.get("site") == "vk":
+        return BrowserVkSource(name, conf)
+    return BrowserAvitoSource(name, conf)
 
 
 def build_sources():
@@ -1206,24 +756,13 @@ _HELP_BASE = """<b>Команды</b>
 /help — это сообщение
 """
 
-if MODE == "browser":
-    HELP = _HELP_BASE + """/login — открыть Авито и ВК для входа
+HELP = _HELP_BASE + """/login — войти в Авито и ВК
 
 Читаю через собственный браузер: логинишься в его
 окне один раз, дальше всё само."""
-else:
-    HELP = _HELP_BASE + """/avito — прислать cURL страницы мессенджера Авито
-/vk — прислать cURL или токен ВК
-/proxy avito http://... — выход в РФ для Авито
-
-Лёгкий режим, без браузера: доступ обновляешь,
-присылая боту cURL из DevTools."""
 
 HELP += ("\n\nСлужебные отправители, сообщества и свои исходящие "
          "отсекаются — шлю только живых людей.")
-
-pending = {"await": None}
-
 
 def handle(msg):
     frm = msg.get("from") or {}
@@ -1314,36 +853,6 @@ def handle(msg):
                  "\n\nДобавить: <code>/ignore слово</code>\n"
                  "Убрать: <code>/ignore- слово</code>", chat_id=chat_id)
         return
-    if low.startswith("/proxy"):
-        parts = text.split(None, 2)
-        if len(parts) < 3:
-            cur = {n: (c.get("proxy") or "нет")
-                   for n, c in (cfg.get("sources") or {}).items()}
-            send("<b>Прокси</b>\n" +
-                 ("\n".join("• %s: <code>%s</code>" % (esc(k), esc(v))
-                            for k, v in cur.items()) or "<i>источников нет</i>") +
-                 "\n\nЗадать: <code>/proxy avito http://user:pass@host:8080</code>"
-                 "\nУбрать: <code>/proxy avito -</code>"
-                 "\n\nТолько HTTP(S)-прокси. Нужен выход в РФ — "
-                 "с зарубежного IP Авито отдаёт 429.", chat_id=chat_id)
-            return
-        name, val = parts[1], parts[2].strip()
-        src_conf = (cfg.get("sources") or {}).get(name)
-        if not src_conf:
-            send("Нет источника <code>%s</code>." % esc(name), chat_id=chat_id)
-            return
-        old = src_conf.get("proxy")
-        src_conf["proxy"] = None if val == "-" else val
-        try:
-            build_one(name, src_conf).poll()
-        except Exception as e:
-            src_conf["proxy"] = old
-            send("❌ Через этот прокси не вышло: %s" % esc(e), chat_id=chat_id)
-            return
-        save_cfg()
-        send("✅ Прокси для <b>%s</b>: <code>%s</code>"
-             % (esc(name), esc(src_conf["proxy"] or "нет")), chat_id=chat_id)
-        return
     if low.startswith("/recipient") or low.startswith("/to "):
         parts = text.split(None, 1)
         val = parts[1].strip() if len(parts) > 1 else ""
@@ -1401,7 +910,7 @@ def handle(msg):
              "<code>sabz-notifier reconfigure</code> — спросит всё заново\n\n"
              "Удалить: <code>sabz-notifier uninstall</code> — данные останутся,\n"
              "<code>sabz-notifier uninstall --full</code> — снести подчистую"
-             % (esc(MODE), " (headless)" if HEADLESS else "",
+             % (" (headless)" if HEADLESS else "",
                 esc(("@" + OWNER) if OWNER else "не задан"),
                 esc(eff_recipient() or "этот чат"),
                 esc(cfg.get("interval")),
@@ -1420,17 +929,11 @@ def handle(msg):
             if s.get("blocked"):
                 st_txt = "🚧 ждёт прохождения проверки «не робот»"
             elif s.get("dead"):
-                st_txt = "❌ нужен вход в окне браузера" \
-                    if c.get("kind") == "browser" else "❌ нужен новый доступ"
+                st_txt = "❌ нужен вход — команда /login"
             else:
                 st_txt = "✅ работает"
             lines.append("\n%s <b>%s</b> — %s"
                          % (ICON.get(n, "•"), esc(n), st_txt))
-            if c.get("kind") == "browser":
-                lines.append("  режим: свой браузер (%s)" % esc(c.get("site", "?")))
-            elif c.get("kind") != "vk":
-                lines.append("  хост: <code>%s</code>"
-                             % esc(cookie_domain(c["request"]["url"])))
             lines.append("  чатов в памяти: %d" % len(s.get("seen", {})))
         send("\n".join(lines), chat_id=chat_id)
         return
@@ -1444,123 +947,14 @@ def handle(msg):
              "как обычно — я подхвачу сам, ничего вставлять не надо.",
              chat_id=chat_id)
         return
-    if low.startswith("/avito"):
-        rest = text[len("/avito"):].strip()
-        cur = (cfg.get("sources") or {}).get("avito") or {}
-        if cur.get("kind") == "browser" and not rest:
-            send("Авито читается через браузер бота. Если просит войти — "
-                 "команда <code>/login</code>, дальше логинишься в окне. "
-                 "cURL не нужен.", chat_id=chat_id)
-            return
-        if rest:
-            return setup_replay("avito", rest, chat_id)
-        pending["await"] = "avito"
-        send("<b>Доступ к Авито</b>\n\n"
-             "Открой в браузере страницу мессенджера под своим аккаунтом:\n"
-             "<code>avito.ru/profile/messenger</code>\n\n"
-             "1. Нажми <b>F12</b> — откроется панель разработчика\n"
-             "2. Перейди на вкладку <b>Network</b> (Сеть)\n"
-             "3. В строке фильтров нажми <b>Doc</b>\n"
-             "4. Обнови страницу — <b>F5</b>\n"
-             "5. В списке появится строка <code>messenger</code> — "
-             "щёлкни по ней <b>правой кнопкой</b>\n"
-             "6. Выбери <b>Copy → Copy as cURL (bash)</b>\n"
-             "7. Вставь сюда одним сообщением\n\n"
-             "<i>Нужен запрос самой страницы, а не какой-то другой: список "
-             "чатов Авито отдаёт прямо внутри HTML, отдельного запроса за "
-             "ним просто нет.</i>", chat_id=chat_id)
-        return
-    if low.startswith("/vk"):
-        rest = text[len("/vk"):].strip()
-        cur = (cfg.get("sources") or {}).get("vk") or {}
-        if cur.get("kind") == "browser" and not rest:
-            send("ВК читается через браузер бота. Если просит войти — "
-                 "команда <code>/login</code>.", chat_id=chat_id)
-            return
-        if rest:
-            return setup_vk(rest, chat_id)
-        pending["await"] = "vk"
-        send("<b>Доступ к ВК</b>\n\n"
-             "Проще всего токеном — это одна ссылка и одно копирование.\n\n"
-             "1. Открой в браузере, где ты залогинен во ВК:\n"
-             "<code>https://oauth.vk.com/authorize?client_id=2685278"
-             "&amp;scope=messages,offline"
-             "&amp;redirect_uri=https://oauth.vk.com/blank.html"
-             "&amp;display=page&amp;response_type=token&amp;revoke=1</code>\n\n"
-             "2. Нажми <b>Разрешить</b>\n"
-             "3. Страница будет пустой — смотри в <b>адресную строку</b>\n"
-             "4. Скопируй то, что идёт после <code>access_token=</code> "
-             "и до первого <code>&amp;</code> — начинается на <code>vk1.</code>\n"
-             "5. Вставь сюда одним сообщением\n\n"
-             "<i>Способ неофициальный: ВК не выдаёт право на чтение сообщений "
-             "обычным приложениям, поэтому используется идентификатор "
-             "стороннего клиента. Аккаунт и сообщения твои, но знать об этом "
-             "стоит.</i>", chat_id=chat_id)
+    if low.startswith("/avito") or low.startswith("/vk"):
+        send("Авито и ВК читаются через собственный браузер бота — "
+             "ничего присылать не нужно.\n\nЕсли он просит войти, набери "
+             "<code>/login</code>: на сервере это откроет окно браузера, "
+             "где ты залогинишься один раз.", chat_id=chat_id)
         return
 
-    if pending.get("await") == "avito":
-        pending["await"] = None
-        return setup_replay("avito", text, chat_id)
-    if pending.get("await") == "vk":
-        pending["await"] = None
-        return setup_vk(text, chat_id)
-
-    if "curl" in low:
-        return setup_replay("avito", text, chat_id)
     send("Не понял.\n\n" + HELP, chat_id=chat_id)
-
-
-def setup_replay(name, blob, chat_id):
-    try:
-        req = parse_curl(blob)
-    except Exception as e:
-        send("❌ Не смог разобрать cURL: %s" % esc(e), chat_id=chat_id)
-        return
-    if not any(k.lower() == "cookie" for k in req["headers"]):
-        send("❌ В этом cURL нет заголовка Cookie — скопируй запрос со "
-             "страницы, где ты залогинен.", chat_id=chat_id)
-        return
-    conf = {"kind": "replay", "request": req, "enabled": True}
-    if name == "vk" or looks_like_vk(req["url"]):
-        conf["parser"] = "vk"
-    old = (cfg.get("sources") or {}).get(name) or {}
-    if old.get("proxy"):
-        conf["proxy"] = old["proxy"]
-    try:
-        chats = ReplaySource(name, conf).poll()
-    except Exception as e:
-        send("❌ Проверка не прошла: %s\n\nХост: <code>%s</code>\n"
-             "Похоже, это не тот запрос — нужен тот, что отдаёт список чатов."
-             % (esc(e), esc(cookie_domain(req["url"]))), chat_id=chat_id)
-        return
-    cfg.setdefault("sources", {})[name] = conf
-    save_cfg()
-    state.pop(name, None)
-    save_state()
-    send("✅ <b>%s</b> подключён.\nХост: <code>%s</code>\nВижу чатов: %d\n\n"
-         "Первый опрос запомнит текущее состояние молча, дальше пришлю "
-         "только новое." % (esc(name), esc(cookie_domain(req["url"])),
-                            len(chats)), chat_id=chat_id)
-
-
-def setup_vk(blob, chat_id):
-    blob = blob.strip()
-    # cURL из DevTools -> куки-режим; иначе считаем, что прислали токен
-    if blob.lower().startswith("curl") or "\nhost:" in blob.lower() \
-            or "http://" in blob or "https://" in blob:
-        return setup_replay("vk", blob, chat_id)
-    token = blob.split()[0].strip()
-    conf = {"kind": "vk", "token": token, "enabled": True}
-    try:
-        VkSource("vk", conf).poll()
-    except Exception as e:
-        send("❌ Токен не подошёл: %s" % esc(e), chat_id=chat_id)
-        return
-    cfg.setdefault("sources", {})["vk"] = conf
-    save_cfg()
-    state.pop("vk", None)
-    save_state()
-    send("✅ <b>VK</b> подключён.", chat_id=chat_id)
 
 
 def telegram_loop():
@@ -1594,7 +988,7 @@ DEFAULT_SOURCES = {
 def selfcheck():
     """Проверка установки без обращения к очереди обновлений Telegram."""
     ok = True
-    print("режим        : %s%s" % (MODE, " (headless)" if HEADLESS else ""))
+    print("режим        : браузер%s" % (" (headless)" if HEADLESS else ""))
     print("каталог      : %s" % DATA)
     print("владелец     : %s" % (("@" + OWNER) if OWNER else "любой (не задан)"))
     if not TG_TOKEN:
@@ -1625,12 +1019,12 @@ def selfcheck():
     except Exception as e:
         print("✗ запись     : %s" % e)
         ok = False
-    if MODE == "browser":
+    if True:
         try:
             import playwright                                  # noqa: F401
             print("✓ playwright : установлен")
         except Exception:
-            print("✗ playwright : не установлен (нужен для BOT_MODE=browser)")
+            print("✗ playwright : не установлен — без него бот не заработает")
             ok = False
     cid = cfg.get("chat_id")
     print("chat_id      : %s" % (cid or "ещё нет — напиши боту /start"))
@@ -1642,12 +1036,12 @@ def main():
     if not TG_TOKEN:
         raise SystemExit("TG_TOKEN не задан (см. .env)")
     os.makedirs(DATA, exist_ok=True)
-    if MODE == "browser" and not cfg.get("sources"):
+    if not cfg.get("sources"):
         cfg["sources"] = json.loads(json.dumps(DEFAULT_SOURCES))
         cfg.setdefault("interval", 40)
         save_cfg()
-    log("старт. режим=%s владелец=@%s источников=%d"
-        % (MODE, OWNER, len(cfg.get("sources") or {})))
+    log("старт. владелец=@%s источников=%d"
+        % (OWNER, len(cfg.get("sources") or {})))
     threading.Thread(target=source_loop, daemon=True).start()
     telegram_loop()
 
