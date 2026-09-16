@@ -282,11 +282,11 @@ class Blocked(Exception):
 
 def blocked_hint():
     """Что делать владельцу, чтобы снять проверку «вы не робот»."""
-    return ("Проверку проходит человек, не бот. Открой браузер бота и нажми "
-            "кнопку: на сервере это <code>sabz-notifier login</code>, "
-            "дальше по ссылке, которую он покажет.\n\n"
-            "Важно: проходить надо с того же адреса, откуда ходит бот — "
-            "из домашнего браузера не поможет.")
+    return ("Проверку проходит человек, не бот. Пришли мне "
+            "<code>/login</code> — я открою окно и дам ссылку, "
+            "там и нажмёшь кнопку.\n\n"
+            "<i>Проходить надо с того же адреса, откуда хожу я, — "
+            "из своего браузера не поможет.</i>")
 
 
 class Transient(Exception):
@@ -326,6 +326,7 @@ class BrowserHub(object):
         self._pw = None
         self.ctx = None
         self.pages = {}
+        self.headless_override = None   # на время входа окно должно быть видно
 
     @classmethod
     def get(cls):
@@ -359,7 +360,8 @@ class BrowserHub(object):
                 self.ctx = self._pw.chromium.launch_persistent_context(
                     BROWSER_DIR,
                     channel=ch,
-                    headless=HEADLESS,
+                    headless=(HEADLESS if self.headless_override is None
+                              else self.headless_override),
                     viewport={"width": 1280, "height": 880},
                     locale="ru-RU",
                     timezone_id="Europe/Moscow",
@@ -411,6 +413,125 @@ class BrowserHub(object):
         self.ctx = None
         self._pw = None
         self.pages = {}
+
+
+# ------------------------------------------------------------ вход в окно ---
+# На сервере окна нет, поэтому поднимаем виртуальный экран и отдаём его в
+# браузер по ссылке. Всё это живёт только на время входа.
+LOGIN = {"want": False, "stop": False, "until": 0, "procs": [], "url": None}
+NOVNC_DIRS = ("/usr/share/novnc", "/usr/share/webapps/novnc")
+
+
+def _which(name):
+    from shutil import which
+    return which(name)
+
+
+def _public_ip():
+    for url in ("https://api.ipify.org", "https://ifconfig.me/ip"):
+        try:
+            st, raw, _ = http(url, timeout=8)
+            ip = raw.decode("ascii", "ignore").strip()
+            if st == 200 and ip and len(ip) < 46:
+                return ip
+        except Exception:
+            pass
+    return None
+
+
+def stop_login_session(quiet=False):
+    import subprocess                                    # noqa: F401
+    for p in LOGIN.get("procs") or []:
+        try:
+            p.terminate()
+        except Exception:
+            pass
+    LOGIN["procs"] = []
+    LOGIN["until"] = 0
+    LOGIN["url"] = None
+    os.environ.pop("DISPLAY", None)
+    hub = BrowserHub.get()
+    hub.headless_override = None
+    hub.reset()
+    if not quiet:
+        send("🔒 Окно входа закрыто, доступ снаружи больше не открыт. "
+             "Продолжаю следить.")
+    log("сессия входа закрыта")
+
+
+def start_login_session():
+    """Поднимает виртуальный экран и отдаёт ссылку на него в Telegram."""
+    import subprocess
+    import secrets
+
+    missing = [n for n in ("Xvfb", "x11vnc", "websockify") if not _which(n)]
+    if missing:
+        send("Не могу открыть окно: на сервере нет %s.\nПереустанови бота — "
+             "установщик их ставит." % esc(", ".join(missing)))
+        return
+    novnc = next((d for d in NOVNC_DIRS if os.path.isdir(d)), None)
+    if not novnc:
+        send("Не могу открыть окно: не найден novnc. Переустанови бота.")
+        return
+
+    stop_login_session(quiet=True)
+    BrowserHub.get().reset()
+
+    tmpdir = os.path.join(DATA, "login")
+    os.makedirs(tmpdir, exist_ok=True)
+    pw = secrets.token_hex(4)
+    pwfile = os.path.join(tmpdir, "vncpw")
+    devnull = subprocess.DEVNULL
+    try:
+        subprocess.run(["x11vnc", "-storepasswd", pw, pwfile],
+                       stdout=devnull, stderr=devnull, timeout=20)
+        os.chmod(pwfile, 0o600)
+        procs = [subprocess.Popen(["Xvfb", ":99", "-screen", "0",
+                                   "1280x900x24"],
+                                  stdout=devnull, stderr=devnull)]
+        time.sleep(2)
+        procs.append(subprocess.Popen(
+            ["x11vnc", "-display", ":99", "-rfbauth", pwfile,
+             "-forever", "-shared", "-quiet"], stdout=devnull, stderr=devnull))
+        time.sleep(1)
+        procs.append(subprocess.Popen(
+            ["websockify", "--web", novnc, "0.0.0.0:6080", "127.0.0.1:5900"],
+            stdout=devnull, stderr=devnull))
+        time.sleep(1)
+        LOGIN["procs"] = procs
+        for p in procs:
+            if p.poll() is not None:
+                raise RuntimeError("процесс экрана не поднялся")
+    except Exception as e:
+        log("login: %s" % e)
+        stop_login_session(quiet=True)
+        send("Не смог поднять окно входа: %s" % esc(e))
+        return
+
+    os.environ["DISPLAY"] = ":99"
+    hub = BrowserHub.get()
+    hub.headless_override = False
+    try:
+        pg = hub.page("avito")
+        pg.goto("https://www.avito.ru/profile/messenger",
+                wait_until="domcontentloaded")
+        vk = hub.page("vk")
+        vk.goto("https://vk.ru/im", wait_until="domcontentloaded")
+    except Exception as e:
+        log("login pages: %s" % e)
+
+    ip = _public_ip() or "IP_СЕРВЕРА"
+    url = "http://%s:6080/vnc.html?autoconnect=true&password=%s" % (ip, pw)
+    LOGIN["url"] = url
+    LOGIN["until"] = time.time() + 1800
+    send("🖥 <b>Окно открыто — жми сюда:</b>\n\n%s\n\n"
+         "Увидишь две вкладки: <b>Авито</b> и <b>ВК</b>. Залогинься в обеих. "
+         "Если Авито попросит подтвердить, что ты не робот — нажми кнопку "
+         "там же.\n\nКогда закончишь, пришли <code>/login stop</code>. "
+         "Само закроется через 30 минут.\n\n"
+         "<i>Ссылка одноразовая, пароль в ней новый каждый раз, и доступ "
+         "снаружи открыт только пока идёт вход.</i>" % url, preview=False)
+    log("сессия входа открыта: %s" % url)
 
 
 def _pw_is_closed_error(e):
@@ -688,6 +809,15 @@ def source_loop():
     backoff = {}
     while True:
         try:
+            if LOGIN.get("want"):
+                LOGIN["want"] = False
+                start_login_session()
+            if LOGIN.get("stop"):
+                LOGIN["stop"] = False
+                stop_login_session()
+            if LOGIN.get("until") and time.time() > LOGIN["until"]:
+                stop_login_session()
+
             srcs = build_sources()
             if not cfg.get("chat_id") or not srcs:
                 time.sleep(5)
@@ -904,6 +1034,7 @@ def handle(msg):
              "<code>/interval 40</code> — как часто проверять\n"
              "<code>/ignore слово</code> — что не слать\n"
              "<code>/mute</code> и <code>/unmute</code> — тишина\n"
+             "<code>/login</code> — войти в Авито и ВК (пришлю ссылку)\n"
              "<code>/restart</code> — перезапустить бота\n\n"
              "Токен, владельца и режим меняют на сервере:\n"
              "<code>sabz-notifier config recipient @name</code>\n"
@@ -939,12 +1070,27 @@ def handle(msg):
         return
 
     if low.startswith("/login"):
-        for n in ("avito", "vk"):
-            st = state.setdefault(n, {})
-            st["relogin"] = True
-        save_state()
-        send("Открываю окна Авито и ВК в браузере бота. Залогинься в них "
-             "как обычно — я подхвачу сам, ничего вставлять не надо.",
+        arg = text[len("/login"):].strip().lower()
+        if arg in ("stop", "стоп", "close"):
+            if LOGIN.get("until"):
+                LOGIN["stop"] = True
+                send("Закрываю окно входа…", chat_id=chat_id)
+            else:
+                send("Окно входа и так закрыто.", chat_id=chat_id)
+            return
+        if IS_WINDOWS:
+            for n in ("avito", "vk"):
+                state.setdefault(n, {})["relogin"] = True
+            save_state()
+            send("Вывожу окна Авито и ВК на экран этого компьютера — "
+                 "залогинься в них как обычно.", chat_id=chat_id)
+            return
+        if LOGIN.get("until") and LOGIN.get("url"):
+            send("Окно уже открыто, вот ссылка:\n\n%s" % LOGIN["url"],
+                 chat_id=chat_id)
+            return
+        LOGIN["want"] = True
+        send("Открываю окно… пришлю ссылку сюда через полминуты.",
              chat_id=chat_id)
         return
     if low.startswith("/avito") or low.startswith("/vk"):
