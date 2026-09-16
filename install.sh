@@ -437,7 +437,17 @@ else
   say "    2. Войди в аккаунты: ${BD}${APP} login${N} (откроет браузер через SSH-туннель)"
 fi
 say ""
-say "  ${BD}Управление:${N}  ${APP} status | logs | restart | selfcheck | uninstall"
+say "  ${BD}Управление:${N}"
+say "    ${APP} status            состояние и самопроверка"
+say "    ${APP} logs -f           смотреть логи вживую"
+say "    ${APP} restart           перезапустить"
+say "    ${APP} config            показать настройки"
+say "    ${APP} config recipient @name   сменить и перезапустить"
+say "    ${APP} reconfigure       спросить токен/владельца/получателя заново"
+say "    ${APP} uninstall         удалить"
+say ""
+say "  ${BD}Прямо в Telegram:${N} /settings — все настройки и что можно"
+say "  менять из чата: /recipient, /interval, /ignore, /mute, /restart"
 say "  ${D}подробный лог установки: ${LOG}${N}"
 say ""
 if [ "$MODE" = "light" ]; then

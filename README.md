@@ -88,18 +88,58 @@ sudo sabz-notifier login
 sabz-notifier status      # состояние + самопроверка
 sabz-notifier logs -f     # логи вживую
 sabz-notifier restart
-sabz-notifier config      # настройки, токен скрыт
 sudo ./install.sh --uninstall
 ```
+
+## Изменить настройки
+
+Посмотреть текущие (токен скрыт):
+
+```bash
+sabz-notifier config
+```
+
+Поменять один параметр — бот перезапустится сам:
+
+```bash
+sudo sabz-notifier config recipient @sabzrr
+```
+
+Ключи: `token`, `owner`, `recipient`, `mode`. Значение получателя можно писать
+с `@` и без — приведётся само.
+
+Переспросить всё заново (Enter — оставить как есть), с перезапуском и
+самопроверкой в конце:
+
+```bash
+sudo sabz-notifier reconfigure
+```
+
+Часть настроек меняется **прямо из Telegram**, без захода на сервер:
+
+```
+/settings         все настройки и что из них можно менять
+/recipient @name  кому слать уведомления (/recipient - — снова себе)
+/interval 40      как часто проверять
+/ignore слово     что не присылать
+/mute /unmute     тишина
+/restart          перезапустить бота
+```
+
+Смена режима с `light` на `browser` требует браузера, поэтому делается
+переустановкой: `sudo ./install.sh --mode browser`.
 
 ## Команды бота в Telegram
 
 ```
 /status          что настроено и живо ли
+/settings        все настройки и как их менять
+/recipient @name кому слать уведомления; /recipient - — снова себе
 /interval 25     период опроса, секунды
 /ignore слово    не слать, если слово есть в имени или тексте
 /ignore          показать список; /ignore- слово — убрать
 /mute /unmute    тишина
+/restart         перезапустить бота
 /test            проверить связь
 /login           (browser) открыть Авито и ВК для входа
 /proxy avito ... (light) HTTP-прокси для Авито

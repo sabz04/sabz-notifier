@@ -37,14 +37,103 @@ usage() {
   cat <<EOF
 ${BD}${APP}${N} — уведомления Avito и VK в Telegram
 
-  ${APP} ${BD}status${N}      состояние службы и самопроверка
-  ${APP} ${BD}logs${N} [-f]   логи (-f — следить вживую)
+  ${APP} ${BD}status${N}            состояние службы и самопроверка
+  ${APP} ${BD}logs${N} [-f]         логи (-f — следить вживую)
   ${APP} ${BD}start${N} | ${BD}stop${N} | ${BD}restart${N}
-  ${APP} ${BD}selfcheck${N}   проверить токен, доступы, каталоги
-  ${APP} ${BD}login${N}       войти в Авито/ВК ${D}(режим browser)${N}
-  ${APP} ${BD}config${N}      показать настройки (токен скрыт)
-  ${APP} ${BD}uninstall${N}   удалить бота
+  ${APP} ${BD}selfcheck${N}         проверить токен, доступы, каталоги
+  ${APP} ${BD}login${N}             войти в Авито/ВК ${D}(режим browser)${N}
+  ${APP} ${BD}config${N}            показать настройки (токен скрыт)
+  ${APP} ${BD}config${N} КЛЮЧ ЗНАЧ  изменить и перезапустить
+  ${APP} ${BD}reconfigure${N}       спросить всё заново
+  ${APP} ${BD}uninstall${N}         удалить бота
+
+${BD}Ключи для config${N}
+  token       токен бота от @BotFather
+  owner       кто управляет: @username или id
+  recipient   кому слать: @username, @канал или id
+  mode        light или browser
+
+${BD}Примеры${N}
+  ${APP} config recipient @sabzrr
+  ${APP} config token 123456:AA...
 EOF
+}
+
+# правит ключ в .env, создаёт если его там не было
+set_env() {
+  local k="$1" v="$2"
+  if grep -qE "^${k}=" "$DIR/.env" 2>/dev/null; then
+    sed -i -E "s#^${k}=.*#${k}=${v}#" "$DIR/.env"
+  else
+    printf '%s=%s\n' "$k" "$v" >> "$DIR/.env"
+  fi
+  chown root:"$SVC_USER" "$DIR/.env" 2>/dev/null || true
+  chmod 640 "$DIR/.env" 2>/dev/null || true
+}
+
+key_of() {
+  case "$1" in
+    token|TG_TOKEN)             echo TG_TOKEN;;
+    owner|TG_OWNER)             echo TG_OWNER;;
+    recipient|to|TG_RECIPIENT)  echo TG_RECIPIENT;;
+    mode|BOT_MODE)              echo BOT_MODE;;
+    *) echo "";;
+  esac
+}
+
+cmd_config() {
+  if [ $# -eq 0 ]; then
+    sed -E 's/^(TG_TOKEN=).*/\1<скрыт>/' "$DIR/.env"
+    echo
+    printf '  %sизменить:%s %s config recipient @name\n' "$D" "$N" "$APP"
+    printf '  %sзаново:  %s %s reconfigure\n' "$D" "$N" "$APP"
+    return 0
+  fi
+  need_root config
+  [ $# -ge 2 ] || die "нужно: ${APP} config КЛЮЧ ЗНАЧЕНИЕ"
+  local k; k="$(key_of "$1")"
+  [ -n "$k" ] || die "неизвестный ключ «$1» (token, owner, recipient, mode)"
+  local v="$2"
+  case "$k" in
+    TG_TOKEN)  [[ "$v" == *:* ]] || die "токен не похож на токен";;
+    TG_OWNER)  v="${v#@}";;
+    TG_RECIPIENT)
+      case "$v" in ""|@*) ;; *[!0-9-]*) v="@${v}";; esac;;
+    BOT_MODE)
+      case "$v" in light|browser) ;; *) die "режим: light или browser";; esac
+      if [ "$v" = "browser" ] && [ ! -x "$DIR/venv/bin/python3" ]; then
+        die "для browser нужен браузер — переустанови: install.sh --mode browser"
+      fi
+      set_env BOT_HEADLESS "$([ "$v" = browser ] && echo 1 || echo "")";;
+  esac
+  set_env "$k" "$v"
+  ok "${k} = ${v}"
+  systemctl restart "${APP}.service" 2>/dev/null \
+    && ok "бот перезапущен" || warn "служба не запущена — стартани: ${APP} start"
+}
+
+cmd_reconfigure() {
+  need_root reconfigure
+  local cur_owner cur_rcp cur_mode a
+  cur_owner="$(envval TG_OWNER)"; cur_rcp="$(envval TG_RECIPIENT)"
+  cur_mode="$(mode)"
+  echo "  Enter — оставить как есть."
+  echo
+  read -r -p "  Токен бота [${D}скрыт${N}]: " a || true
+  [ -n "$a" ] && { [[ "$a" == *:* ]] || die "токен не похож на токен"; set_env TG_TOKEN "$a"; }
+  read -r -p "  Кто управляет ботом [${cur_owner}]: " a || true
+  [ -n "$a" ] && set_env TG_OWNER "${a#@}"
+  read -r -p "  Кому слать уведомления [${cur_rcp}]: " a || true
+  if [ -n "$a" ]; then
+    case "$a" in ""|@*) ;; *[!0-9-]*) a="@${a}";; esac
+    set_env TG_RECIPIENT "$a"
+  fi
+  echo
+  ok "настройки записаны"
+  systemctl restart "${APP}.service" 2>/dev/null \
+    && ok "бот перезапущен" || warn "служба не запущена — стартани: ${APP} start"
+  echo
+  as_bot "$PY" "$DIR/bot.py" --selfcheck 2>&1 | sed 's/^/  /' || true
 }
 
 cmd_status() {
@@ -162,7 +251,8 @@ case "${1:-help}" in
   restart)   need_root restart; systemctl restart "${APP}.service"; ok "перезапущен";;
   selfcheck) as_bot "$PY" "$DIR/bot.py" --selfcheck;;
   login)     cmd_login;;
-  config)    sed -E 's/^(TG_TOKEN=).*/\1<скрыт>/' "$DIR/.env";;
+  config)    shift; cmd_config "$@";;
+  reconfigure|reconf) cmd_reconfigure;;
   uninstall) need_root uninstall
              die "запусти install.sh --uninstall из папки репозитория";;
   help|-h|--help) usage;;

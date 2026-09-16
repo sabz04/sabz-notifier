@@ -197,6 +197,11 @@ def _norm_target(v):
     return v if v.startswith("@") else "@" + v
 
 
+def eff_recipient():
+    """Получатель: заданный командой важнее записанного в .env."""
+    return (cfg.get("recipient") or RECIPIENT or "").strip()
+
+
 def notify_target():
     """Куда шлём уведомления.
 
@@ -204,7 +209,7 @@ def notify_target():
     только в канал/супергруппу, поэтому для обычного человека используем
     id, который бот запомнил, когда тот написал ему /start.
     """
-    r = (RECIPIENT or "").strip()
+    r = eff_recipient()
     if not r:
         return cfg.get("chat_id")
     if r.lstrip("-").isdigit():
@@ -1190,10 +1195,13 @@ def source_loop():
 # ------------------------------------------------------------- tg command ---
 _HELP_BASE = """<b>Команды</b>
 /status — что настроено и живо ли
+/settings — все настройки и как их менять
+/recipient @name — кому слать уведомления
 /interval 40 — период опроса, сек
 /ignore слово — не слать, если есть в имени/тексте
 /ignore — показать список, /ignore- слово — убрать
 /mute, /unmute — тишина
+/restart — перезапустить бота
 /test — проверить связь
 /help — это сообщение
 """
@@ -1224,7 +1232,7 @@ def handle(msg):
     text = (msg.get("text") or "").strip()
     # получателя запоминаем до проверки владельца: он может быть другим
     # человеком, и другого шанса узнать его числовой id у нас нет
-    want = (RECIPIENT or "").strip().lstrip("@").lower()
+    want = eff_recipient().lstrip("@").lower()
     if want and not want.lstrip("-").isdigit() \
             and (uname == want or str(frm.get("id")) == want) \
             and cfg.get("recipient_chat_id") != chat_id:
@@ -1322,6 +1330,69 @@ def handle(msg):
         send("✅ Прокси для <b>%s</b>: <code>%s</code>"
              % (esc(name), esc(src_conf["proxy"] or "нет")), chat_id=chat_id)
         return
+    if low.startswith("/recipient") or low.startswith("/to "):
+        parts = text.split(None, 1)
+        val = parts[1].strip() if len(parts) > 1 else ""
+        if not val:
+            send("Сейчас уведомления идут: <code>%s</code>\n\n"
+                 "Сменить: <code>/recipient @username</code> или "
+                 "<code>/recipient 123456789</code>\n"
+                 "Вернуть себе: <code>/recipient -</code>"
+                 % esc(eff_recipient() or "в этот чат"), chat_id=chat_id)
+            return
+        if val == "-":
+            cfg.pop("recipient", None)
+            cfg.pop("recipient_chat_id", None)
+            cfg["chat_id"] = chat_id
+            save_cfg()
+            send("✅ Уведомления снова приходят сюда.", chat_id=chat_id)
+            return
+        cfg["recipient"] = val
+        cfg.pop("recipient_chat_id", None)
+        save_cfg()
+        tgt = notify_target()
+        if tgt and tg("getChat", chat_id=tgt).get("ok"):
+            send("✅ Получатель: <code>%s</code> — доступен."
+                 % esc(val), chat_id=chat_id)
+        else:
+            send("✅ Получатель записан: <code>%s</code>\n\n"
+                 "Telegram не разрешает боту писать первым — попроси его "
+                 "отправить мне <code>/start</code>, после этого уведомления "
+                 "пойдут." % esc(val), chat_id=chat_id)
+        return
+
+    if low.startswith("/restart"):
+        send("♻️ Перезапускаюсь, вернусь через несколько секунд.",
+             chat_id=chat_id)
+        log("перезапуск по команде владельца")
+        threading.Timer(1.5, lambda: os._exit(1)).start()
+        return
+
+    if low.startswith("/settings"):
+        send("<b>Настройки</b>\n"
+             "режим: <code>%s</code>%s\n"
+             "владелец: <code>%s</code>\n"
+             "получатель: <code>%s</code>\n"
+             "период опроса: <code>%s сек</code>\n"
+             "тишина: <code>%s</code>\n"
+             "игнор-слов: <code>%d</code>\n\n"
+             "<b>Что можно менять прямо здесь</b>\n"
+             "<code>/recipient @name</code> — кому слать\n"
+             "<code>/interval 40</code> — как часто проверять\n"
+             "<code>/ignore слово</code> — что не слать\n"
+             "<code>/mute</code> и <code>/unmute</code> — тишина\n"
+             "<code>/restart</code> — перезапустить бота\n\n"
+             "Токен, владельца и режим меняют на сервере:\n"
+             "<code>sabz-notifier config recipient @name</code>\n"
+             "<code>sabz-notifier reconfigure</code> — спросит всё заново"
+             % (esc(MODE), " (headless)" if HEADLESS else "",
+                esc(("@" + OWNER) if OWNER else "не задан"),
+                esc(eff_recipient() or "этот чат"),
+                esc(cfg.get("interval")),
+                "включена" if cfg.get("muted") else "выключена",
+                len(cfg.get("ignore") or [])), chat_id=chat_id)
+        return
+
     if low.startswith("/status"):
         lines = ["<b>Статус</b>",
                  "период: %s сек" % cfg.get("interval"),
