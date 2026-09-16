@@ -198,8 +198,21 @@ def _norm_target(v):
 
 
 def notify_target():
-    """Куда шлём уведомления: явный получатель важнее запомненного чата."""
-    return _norm_target(RECIPIENT) or cfg.get("chat_id")
+    """Куда шлём уведомления.
+
+    Числовой id — берём как есть. Для @username Telegram умеет доставлять
+    только в канал/супергруппу, поэтому для обычного человека используем
+    id, который бот запомнил, когда тот написал ему /start.
+    """
+    r = (RECIPIENT or "").strip()
+    if not r:
+        return cfg.get("chat_id")
+    if r.lstrip("-").isdigit():
+        return int(r)
+    rid = cfg.get("recipient_chat_id")
+    if rid:
+        return rid
+    return "@" + r.lstrip("@")
 
 
 def is_owner(frm):
@@ -1209,6 +1222,17 @@ def handle(msg):
     uname = (frm.get("username") or "").lower()
     chat_id = (msg.get("chat") or {}).get("id")
     text = (msg.get("text") or "").strip()
+    # получателя запоминаем до проверки владельца: он может быть другим
+    # человеком, и другого шанса узнать его числовой id у нас нет
+    want = (RECIPIENT or "").strip().lstrip("@").lower()
+    if want and not want.lstrip("-").isdigit() \
+            and (uname == want or str(frm.get("id")) == want) \
+            and cfg.get("recipient_chat_id") != chat_id:
+        cfg["recipient_chat_id"] = chat_id
+        save_cfg()
+        log("получатель %s распознан, чат %s" % (want, chat_id))
+        send("✅ Готово, буду присылать уведомления сюда.", chat_id=chat_id)
+
     if not is_owner(frm):
         log("отклонён чужой пользователь: @%s (%s)" % (uname, frm.get("id")))
         return
