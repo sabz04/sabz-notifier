@@ -305,6 +305,37 @@ class Source(object):
 
 BROWSER_DIR = os.path.join(DATA, "browser")
 
+# Виртуальный экран вместо headless: сайту браузер виден обычным, просто
+# показывать окно некуда. Headless палится по десятку признаков, это — нет.
+XVFB = {"proc": None, "display": ":98"}
+
+
+def ensure_xvfb():
+    """Поднимает Xvfb один раз на весь процесс. Возвращает :display или None."""
+    if IS_WINDOWS:
+        return None
+    p = XVFB.get("proc")
+    if p is not None and p.poll() is None:
+        return XVFB["display"]
+    if not _which("Xvfb"):
+        log("Xvfb не найден — браузер пойдёт в headless")
+        return None
+    import subprocess
+    try:
+        proc = subprocess.Popen(
+            ["Xvfb", XVFB["display"], "-screen", "0", "1280x900x24"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        time.sleep(2)
+        if proc.poll() is not None:
+            log("Xvfb не запустился")
+            return None
+        XVFB["proc"] = proc
+        log("виртуальный экран %s поднят" % XVFB["display"])
+        return XVFB["display"]
+    except Exception as e:
+        log("Xvfb: %s" % e)
+        return None
+
 
 def _dbg_dump(site, obj, tag=""):
     """Разово сохраняет структуру ответа, чтобы подстроить разбор."""
@@ -354,14 +385,23 @@ class BrowserHub(object):
         if not IS_WINDOWS:
             # на сервере часто root и маленький /dev/shm
             args += ["--no-sandbox", "--disable-dev-shm-usage"]
+
+        want_headless = (HEADLESS if self.headless_override is None
+                         else self.headless_override)
+        # окна не нужно — но лучше обычный браузер на виртуальном экране,
+        # чем headless: последний слишком легко узнать
+        if want_headless:
+            disp = ensure_xvfb()
+            if disp:
+                os.environ["DISPLAY"] = disp
+                want_headless = False
         last = None
         for ch in channels:
             try:
                 self.ctx = self._pw.chromium.launch_persistent_context(
                     BROWSER_DIR,
                     channel=ch,
-                    headless=(HEADLESS if self.headless_override is None
-                              else self.headless_override),
+                    headless=want_headless,
                     viewport={"width": 1280, "height": 880},
                     locale="ru-RU",
                     timezone_id="Europe/Moscow",
@@ -844,8 +884,10 @@ def source_loop():
                     if not st.get("dead"):
                         st["dead"] = True
                         save_state()
-                        send("⚠️ <b>%s</b>: %s\n\nПришли новый доступ: команда "
-                             "<code>/%s</code>, потом вставь cURL/токен."
+                        send("⚠️ <b>%s</b>: %s\n\nПришли <code>/login</code> — "
+                             "я открою окно и дам ссылку, там войдёшь.\n"
+                             "Если этот источник сейчас не нужен, выключи его: "
+                             "<code>/%s off</code>"
                              % (esc(src.name), esc(e), esc(src.name)))
                     backoff[src.name] = time.time() + 600
                     log("%s DEAD: %s" % (src.name, e))
@@ -887,6 +929,7 @@ _HELP_BASE = """<b>Команды</b>
 """
 
 HELP = _HELP_BASE + """/login — войти в Авито и ВК
+/avito, /vk — состояние; on/off — включить или выключить
 
 Читаю через собственный браузер: логинишься в его
 окне один раз, дальше всё само."""
@@ -1057,7 +1100,9 @@ def handle(msg):
             lines.append("\n<i>источники не настроены</i>")
         for n, c in (cfg.get("sources") or {}).items():
             s = state.get(n, {})
-            if s.get("blocked"):
+            if not c.get("enabled", True):
+                st_txt = "⛔️ выключен"
+            elif s.get("blocked"):
                 st_txt = "🚧 ждёт прохождения проверки «не робот»"
             elif s.get("dead"):
                 st_txt = "❌ нужен вход — команда /login"
@@ -1094,10 +1139,43 @@ def handle(msg):
              chat_id=chat_id)
         return
     if low.startswith("/avito") or low.startswith("/vk"):
-        send("Авито и ВК читаются через собственный браузер бота — "
-             "ничего присылать не нужно.\n\nЕсли он просит войти, набери "
-             "<code>/login</code>: на сервере это откроет окно браузера, "
-             "где ты залогинишься один раз.", chat_id=chat_id)
+        name = "avito" if low.startswith("/avito") else "vk"
+        parts = text.split(None, 1)
+        arg = parts[1].strip().lower() if len(parts) > 1 else ""
+        src = (cfg.setdefault("sources", {})
+               .setdefault(name, {"kind": "browser", "site": name,
+                                  "enabled": True}))
+        if arg in ("off", "выкл", "выключи", "0", "-"):
+            src["enabled"] = False
+            save_cfg()
+            state.pop(name, None)
+            save_state()
+            send("⛔️ <b>%s</b> выключен — больше не опрашиваю и не беспокою.\n"
+                 "Включить обратно: <code>/%s on</code>"
+                 % (esc(name), esc(name)), chat_id=chat_id)
+            return
+        if arg in ("on", "вкл", "включи", "1", "+"):
+            src["enabled"] = True
+            save_cfg()
+            state.pop(name, None)
+            save_state()
+            send("✅ <b>%s</b> включён. Если попросит войти — "
+                 "<code>/login</code>." % esc(name), chat_id=chat_id)
+            return
+        s = state.get(name, {})
+        if not src.get("enabled", True):
+            status = "⛔️ выключен"
+        elif s.get("blocked"):
+            status = "🚧 ждёт проверки «не робот»"
+        elif s.get("dead"):
+            status = "❌ нужен вход"
+        else:
+            status = "✅ работает"
+        send("<b>%s</b> — %s\n\nЧитаю через собственный браузер, присылать "
+             "ничего не нужно.\n\nВойти: <code>/login</code>\n"
+             "Выключить: <code>/%s off</code>\n"
+             "Включить: <code>/%s on</code>"
+             % (esc(name), status, esc(name), esc(name)), chat_id=chat_id)
         return
 
     send("Не понял.\n\n" + HELP, chat_id=chat_id)
