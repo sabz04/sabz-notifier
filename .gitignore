@@ -1,0 +1,11 @@
+# состояние, куки, профиль браузера — никогда в git
+data/
+*.log
+*.log.1
+.env
+
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
