@@ -9,3 +9,5 @@ __pycache__/
 *.egg-info/
 .venv/
 venv/
+ms-playwright/
+install.log
