@@ -62,6 +62,9 @@ def _flag(name, default=""):
 
 HEADLESS = _flag("BOT_HEADLESS")
 IS_WINDOWS = sys.platform.startswith("win")
+IS_MAC = sys.platform == "darwin"
+# есть живой экран: окно браузера можно показать как есть
+HAS_DESKTOP = IS_WINDOWS or IS_MAC
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36")
@@ -312,7 +315,7 @@ XVFB = {"proc": None, "display": ":98"}
 
 def ensure_xvfb():
     """Поднимает Xvfb один раз на весь процесс. Возвращает :display или None."""
-    if IS_WINDOWS:
+    if HAS_DESKTOP:
         return None
     p = XVFB.get("proc")
     if p is not None and p.poll() is None:
@@ -377,12 +380,16 @@ class BrowserHub(object):
         # системный Chrome/Edge имеют нужные библиотеки; bundled Chromium
         # на этой машине падает с SxS-ошибкой, поэтому он последним
         prefer = cfg.get("browser_channel")
-        order = ("chrome", "msedge", None) if IS_WINDOWS \
-            else (None, "chromium", "chrome")
+        if IS_WINDOWS:
+            order = ("chrome", "msedge", None)
+        elif IS_MAC:
+            order = ("chrome", None, "msedge")
+        else:
+            order = (None, "chromium", "chrome")
         channels = [prefer] if prefer else []
         channels += [c for c in order if c != prefer]
         args = ["--disable-blink-features=AutomationControlled"]
-        if not IS_WINDOWS:
+        if not HAS_DESKTOP:
             # на сервере часто root и маленький /dev/shm
             args += ["--no-sandbox", "--disable-dev-shm-usage"]
 
@@ -1123,7 +1130,7 @@ def handle(msg):
             else:
                 send("Окно входа и так закрыто.", chat_id=chat_id)
             return
-        if IS_WINDOWS:
+        if HAS_DESKTOP:
             for n in ("avito", "vk"):
                 state.setdefault(n, {})["relogin"] = True
             save_state()
