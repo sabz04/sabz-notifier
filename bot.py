@@ -1089,8 +1089,15 @@ def handle(msg):
         return
 
     if low.startswith("/settings"):
+        if HAS_DESKTOP:
+            tail = ("\nТокен и владельца меняют в файле <code>.env</code> "
+                    "рядом с ботом, потом <code>/restart</code>.")
+        else:
+            tail = ("\nТокен, владельца и удаление — командой на сервере:\n"
+                    "<code>sabz-notifier config recipient @name</code>\n"
+                    "<code>sabz-notifier reconfigure</code>\n"
+                    "<code>sabz-notifier uninstall</code>")
         send("<b>Настройки</b>\n"
-             "режим: <code>%s</code>%s\n"
              "владелец: <code>%s</code>\n"
              "получатель: <code>%s</code>\n"
              "период опроса: <code>%s сек</code>\n"
@@ -1100,20 +1107,17 @@ def handle(msg):
              "<code>/recipient @name</code> — кому слать\n"
              "<code>/interval 40</code> — как часто проверять\n"
              "<code>/ignore слово</code> — что не слать\n"
+             "<code>/avito off</code>, <code>/vk off</code> — выключить источник\n"
              "<code>/mute</code> и <code>/unmute</code> — тишина\n"
-             "<code>/login</code> — войти в Авито и ВК (пришлю ссылку)\n"
-             "<code>/restart</code> — перезапустить бота\n\n"
-             "Токен, владельца и режим меняют на сервере:\n"
-             "<code>sabz-notifier config recipient @name</code>\n"
-             "<code>sabz-notifier reconfigure</code> — спросит всё заново\n\n"
-             "Удалить: <code>sabz-notifier uninstall</code> — данные останутся,\n"
-             "<code>sabz-notifier uninstall --full</code> — снести подчистую"
-             % (" (headless)" if HEADLESS else "",
-                esc(("@" + OWNER) if OWNER else "не задан"),
+             "<code>/login</code> — войти в Авито и ВК\n"
+             "<code>/restart</code> — перезапустить бота\n"
+             "%s"
+             % (esc(("@" + OWNER) if OWNER else "не задан"),
                 esc(eff_recipient() or "этот чат"),
                 esc(cfg.get("interval")),
                 "включена" if cfg.get("muted") else "выключена",
-                len(cfg.get("ignore") or [])), chat_id=chat_id)
+                len(cfg.get("ignore") or []),
+                tail), chat_id=chat_id)
         return
 
     if low.startswith("/status"):
@@ -1221,7 +1225,17 @@ def telegram_loop():
                     try:
                         handle(m)
                     except Exception:
+                        # молчать нельзя: снаружи это выглядит как «бот сдох»,
+                        # хотя он живой и ошибка в одной команде
                         log("handle:", traceback.format_exc())
+                        try:
+                            cid = (m.get("chat") or {}).get("id")
+                            if cid:
+                                send("Эта команда сломалась у меня внутри. "
+                                     "Остальное работает, ошибку записал в лог.",
+                                     chat_id=cid)
+                        except Exception:
+                            pass
         except Exception:
             log("telegram_loop:", traceback.format_exc())
             time.sleep(5)
