@@ -352,18 +352,25 @@ cmd_login() {
   }
   trap cleanup EXIT INT TERM
 
-  # одноразовый пароль: порт открыт только пока идёт вход
-  VNCPW="$(tr -dc 'A-Za-z2-9' </dev/urandom | head -c 8)"
+  # одноразовый пароль: порт открыт только пока идёт вход.
+  # od+tr, а не tr|head — head рвёт канал, и под pipefail это валит скрипт
+  VNCPW="$(od -An -tx1 -N4 /dev/urandom | tr -d ' \n')"
   x11vnc -storepasswd "$VNCPW" "$tmp/vncpw" >/dev/null 2>&1
   chmod 600 "$tmp/vncpw"
 
-  Xvfb :99 -screen 0 1280x900x24 >/dev/null 2>&1 & X_PID=$!
-  sleep 1
+  Xvfb :99 -screen 0 1280x900x24 >"$tmp/xvfb.log" 2>&1 & X_PID=$!
+  sleep 2
+  kill -0 "$X_PID" 2>/dev/null || { tail -3 "$tmp/xvfb.log" 2>/dev/null; die "Xvfb не запустился"; }
+
   x11vnc -display :99 -rfbauth "$tmp/vncpw" -forever -shared -quiet \
-    >/dev/null 2>&1 & VNC_PID=$!
-  sleep 1
-  websockify --web="$NOVNC" 0.0.0.0:6080 127.0.0.1:5900 >/dev/null 2>&1 & WS_PID=$!
-  sleep 1
+    >"$tmp/vnc.log" 2>&1 & VNC_PID=$!
+  sleep 2
+  kill -0 "$VNC_PID" 2>/dev/null || { tail -3 "$tmp/vnc.log" 2>/dev/null; die "x11vnc не запустился"; }
+
+  websockify --web="$NOVNC" 0.0.0.0:6080 127.0.0.1:5900 \
+    >"$tmp/ws.log" 2>&1 & WS_PID=$!
+  sleep 2
+  kill -0 "$WS_PID" 2>/dev/null || { tail -3 "$tmp/ws.log" 2>/dev/null; die "websockify не запустился"; }
 
   IP="$(curl -fsS --max-time 8 https://api.ipify.org 2>/dev/null || true)"
   [ -n "$IP" ] || IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
