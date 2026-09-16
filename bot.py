@@ -1455,9 +1455,20 @@ def handle(msg):
         if rest:
             return setup_replay("avito", rest, chat_id)
         pending["await"] = "avito"
-        send("Жду cURL для Avito (ручной режим). "
-             "F12 → Network → запрос мессенджера → Copy as cURL (bash).",
-             chat_id=chat_id)
+        send("<b>Доступ к Авито</b>\n\n"
+             "Открой в браузере страницу мессенджера под своим аккаунтом:\n"
+             "<code>avito.ru/profile/messenger</code>\n\n"
+             "1. Нажми <b>F12</b> — откроется панель разработчика\n"
+             "2. Перейди на вкладку <b>Network</b> (Сеть)\n"
+             "3. В строке фильтров нажми <b>Doc</b>\n"
+             "4. Обнови страницу — <b>F5</b>\n"
+             "5. В списке появится строка <code>messenger</code> — "
+             "щёлкни по ней <b>правой кнопкой</b>\n"
+             "6. Выбери <b>Copy → Copy as cURL (bash)</b>\n"
+             "7. Вставь сюда одним сообщением\n\n"
+             "<i>Нужен запрос самой страницы, а не какой-то другой: список "
+             "чатов Авито отдаёт прямо внутри HTML, отдельного запроса за "
+             "ним просто нет.</i>", chat_id=chat_id)
         return
     if low.startswith("/vk"):
         rest = text[len("/vk"):].strip()
@@ -1469,8 +1480,22 @@ def handle(msg):
         if rest:
             return setup_vk(rest, chat_id)
         pending["await"] = "vk"
-        send("Жду токен VK (строка вида <code>vk1.a....</code>) "
-             "или cURL — ручной режим.", chat_id=chat_id)
+        send("<b>Доступ к ВК</b>\n\n"
+             "Проще всего токеном — это одна ссылка и одно копирование.\n\n"
+             "1. Открой в браузере, где ты залогинен во ВК:\n"
+             "<code>https://oauth.vk.com/authorize?client_id=2685278"
+             "&amp;scope=messages,offline"
+             "&amp;redirect_uri=https://oauth.vk.com/blank.html"
+             "&amp;display=page&amp;response_type=token&amp;revoke=1</code>\n\n"
+             "2. Нажми <b>Разрешить</b>\n"
+             "3. Страница будет пустой — смотри в <b>адресную строку</b>\n"
+             "4. Скопируй то, что идёт после <code>access_token=</code> "
+             "и до первого <code>&amp;</code> — начинается на <code>vk1.</code>\n"
+             "5. Вставь сюда одним сообщением\n\n"
+             "<i>Способ неофициальный: ВК не выдаёт право на чтение сообщений "
+             "обычным приложениям, поэтому используется идентификатор "
+             "стороннего клиента. Аккаунт и сообщения твои, но знать об этом "
+             "стоит.</i>", chat_id=chat_id)
         return
 
     if pending.get("await") == "avito":
