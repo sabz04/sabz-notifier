@@ -386,8 +386,14 @@ class BrowserHub(object):
             order = ("chrome", None, "msedge")
         else:
             order = (None, "chromium", "chrome")
-        channels = [prefer] if prefer else []
-        channels += [c for c in order if c != prefer]
+        # None в списке — это скачанный chromium, и он часто единственный
+        # рабочий. Раньше фильтр по prefer выбрасывал именно его.
+        channels = []
+        if prefer:
+            channels.append(prefer)
+        for c in order:
+            if c not in channels:
+                channels.append(c)
         args = ["--disable-blink-features=AutomationControlled"]
         if not HAS_DESKTOP:
             # на сервере часто root и маленький /dev/shm
@@ -425,6 +431,14 @@ class BrowserHub(object):
                 last = e
                 log("channel=%s не пошёл: %s" % (ch, str(e)[:100]))
         if self.ctx is None:
+            # playwright обязательно остановить: иначе в этом потоке остаётся
+            # живой цикл asyncio, и все следующие попытки падают навсегда
+            # с «Sync API inside the asyncio loop»
+            try:
+                if self._pw:
+                    self._pw.stop()
+            except Exception:
+                pass
             self._pw = None
             raise Transient("не удалось запустить браузер: %s" % str(last)[:120])
         self.ctx.set_default_timeout(45000)
