@@ -39,6 +39,9 @@ usage() {
   cat <<EOF
 ${BD}${APP}${N} — уведомления Avito и VK в Telegram
 
+  ${APP}                    ${BD}меню${N} — всё в одном месте
+
+${BD}Или сразу командой${N}
   ${APP} ${BD}status${N}            состояние службы и самопроверка
   ${APP} ${BD}logs${N} [-f]         логи (-f — следить вживую)
   ${APP} ${BD}start${N} | ${BD}stop${N} | ${BD}restart${N}
@@ -114,6 +117,126 @@ cmd_config() {
   ok "${k} = ${v}"
   systemctl restart "${APP}.service" 2>/dev/null \
     && ok "бот перезапущен" || warn "служба не запущена — стартани: ${APP} start"
+}
+
+# ------------------------------------------------------------------- меню ---
+menu_header() {
+  local act mem line
+  act="$(systemctl is-active "${APP}.service" 2>/dev/null || true)"
+  mem="$(systemctl show "${APP}.service" -p MemoryCurrent --value 2>/dev/null || echo 0)"
+  case "$mem" in ''|*[!0-9]*) mem=0;; esac
+  printf '\n  %s%s%s  %s— уведомления Avito и VK в Telegram%s\n' \
+    "$BD" "$APP" "$N" "$D" "$N"
+  printf '  %s─────────────────────────────────────────────%s\n' "$D" "$N"
+  if [ "$act" = "active" ]; then
+    line="${G}● работает${N}"
+    [ "$mem" -gt 0 ] && line="$line  ${D}$((mem/1048576)) МБ${N}"
+  else
+    line="${Y}○ остановлен${N}"
+  fi
+  printf '  %b\n' "$line"
+  printf '  %sрежим:%s %-8s %sполучатель:%s %s\n' \
+    "$D" "$N" "$(mode)" "$D" "$N" "$(envval TG_RECIPIENT)"
+  printf '\n'
+}
+
+pause() { printf '\n  %sEnter — назад%s' "$D" "$N"; read -r _ || true; }
+
+menu_settings() {
+  local c v
+  while true; do
+    printf '\n  %sНастройки%s\n\n' "$BD" "$N"
+    printf '    1  получатель   %s\n' "$(envval TG_RECIPIENT)"
+    printf '    2  владелец     %s\n' "$(envval TG_OWNER)"
+    printf '    3  токен        %sскрыт%s\n' "$D" "$N"
+    printf '    4  период опроса\n'
+    printf '    5  режим        %s\n' "$(mode)"
+    printf '    6  показать всё\n'
+    printf '    0  назад\n\n'
+    printf '  > '; read -r c || return 0
+    case "$c" in
+      1) printf '  Кому слать (@username или id): '; read -r v || true
+         [ -n "${v:-}" ] && cmd_config recipient "$v"; pause;;
+      2) printf '  Кто управляет (@username или id): '; read -r v || true
+         [ -n "${v:-}" ] && cmd_config owner "$v"; pause;;
+      3) printf '  Новый токен: '; read -r v || true
+         [ -n "${v:-}" ] && cmd_config token "$v"; pause;;
+      4) printf '  Период опроса в секундах: '; read -r v || true
+         if [ -n "${v:-}" ]; then set_interval "$v"; fi; pause;;
+      5) printf '  Режим (light/browser): '; read -r v || true
+         [ -n "${v:-}" ] && cmd_config mode "$v"; pause;;
+      6) cmd_config; pause;;
+      0|"") return 0;;
+      *) warn "не понял";;
+    esac
+  done
+}
+
+set_interval() {
+  need_root menu
+  "$PY" - "$DIR/data/config.json" "$1" <<'PYEOF'
+import json, os, sys
+path, val = sys.argv[1], sys.argv[2]
+try:
+    val = max(10, int(val))
+except ValueError:
+    print("нужно число"); raise SystemExit(1)
+try:
+    d = json.load(open(path, encoding="utf-8"))
+except Exception:
+    d = {}
+d["interval"] = val
+os.makedirs(os.path.dirname(path), exist_ok=True)
+json.dump(d, open(path, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
+print("период опроса: %d сек" % val)
+PYEOF
+  chown "$SVC_USER":"$SVC_USER" "$DIR/data/config.json" 2>/dev/null || true
+  systemctl restart "${APP}.service" 2>/dev/null && ok "бот перезапущен" || true
+}
+
+menu_delete() {
+  local c v
+  printf '\n  %sУдаление%s\n\n' "$BD" "$N"
+  printf '    1  удалить, данные оставить\n'
+  printf '    2  снести подчистую %s(куки, профиль, браузер, swap)%s\n' "$D" "$N"
+  printf '    0  назад\n\n'
+  printf '  > '; read -r c || return 0
+  case "$c" in
+    1) cmd_uninstall; exit 0;;
+    2) printf '  %sЭто сотрёт все данные без возврата.%s\n' "$Y" "$N"
+       printf '  Напиши %sудалить%s для подтверждения: ' "$BD" "$N"
+       read -r v || true
+       if [ "${v:-}" = "удалить" ]; then cmd_uninstall --full; exit 0
+       else warn "отменено"; pause; fi;;
+    *) return 0;;
+  esac
+}
+
+cmd_menu() {
+  [ -t 0 ] || { usage; exit 0; }
+  while true; do
+    menu_header
+    printf '    1  статус и самопроверка\n'
+    printf '    2  логи вживую\n'
+    printf '    3  перезапустить\n'
+    printf '    4  настройки\n'
+    [ "$(mode)" = "browser" ] && printf '    5  войти в Авито и ВК\n'
+    printf '    9  удалить\n'
+    printf '    0  выход\n\n'
+    printf '  > '
+    local c; read -r c || return 0
+    case "$c" in
+      1) cmd_status; pause;;
+      2) printf '  %sCtrl+C — назад%s\n\n' "$D" "$N"
+         journalctl -u "${APP}.service" -f -o cat || true;;
+      3) need_root restart; systemctl restart "${APP}.service" && ok "перезапущен"; pause;;
+      4) menu_settings;;
+      5) [ "$(mode)" = "browser" ] && cmd_login || warn "только в режиме browser"; pause;;
+      9) menu_delete;;
+      0|"") printf '\n'; return 0;;
+      *) warn "не понял";;
+    esac
+  done
 }
 
 cmd_uninstall() {
@@ -286,7 +409,8 @@ PYEOF
   while kill -0 "$PY_PID" 2>/dev/null; do sleep 2; done
 }
 
-case "${1:-help}" in
+case "${1:-menu}" in
+  menu|"")   cmd_menu;;
   status)    cmd_status;;
   logs)      shift; if [ "${1:-}" = "-f" ]; then journalctl -u "${APP}.service" -f -o cat
              else journalctl -u "${APP}.service" -n "${1:-50}" --no-pager -o cat; fi;;

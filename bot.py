@@ -1243,6 +1243,20 @@ def handle(msg):
 
     if not is_owner(frm):
         log("отклонён чужой пользователь: @%s (%s)" % (uname, frm.get("id")))
+        # молчать нельзя: чаще всего это сам хозяин, просто владелец задан
+        # неверно (например, вписали имя бота). Отвечаем не чаще раза в час.
+        seen = state.setdefault("_rejected", {})
+        key = str(chat_id)
+        if time.time() - seen.get(key, 0) > 3600:
+            seen[key] = time.time()
+            save_state()
+            who = ("@" + uname) if uname else str(frm.get("id"))
+            send("Команды принимаю только от владельца, а сейчас владелец — "
+                 "<code>%s</code>.\n\nЕсли бот твой, укажи себя владельцем "
+                 "на сервере:\n<code>sabz-notifier config owner %s</code>\n\n"
+                 "<i>Владелец — твой аккаунт в Telegram, не имя бота.</i>"
+                 % (esc(("@" + OWNER) if OWNER else "не задан"), esc(who)),
+                 chat_id=chat_id)
         return
     if cfg.get("chat_id") != chat_id:
         cfg["chat_id"] = chat_id

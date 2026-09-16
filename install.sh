@@ -22,7 +22,7 @@ else
 fi
 
 TOKEN=""; OWNER=""; RECIPIENT=""; MODE="light"; INTERVAL="25"
-DO_SWAP=1; DO_START=1; ASSUME_YES=0; FORCE=0; UNINSTALL=0; PURGE=0; QUIET=0
+DO_SWAP=1; DO_START=1; ASSUME_YES=0; FORCE=0; UNINSTALL=0; PURGE=0; QUIET=0; FRESH=0
 
 if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
   R=$'\e[31m'; G=$'\e[32m'; Y=$'\e[33m'; B=$'\e[36m'; D=$'\e[2m'; N=$'\e[0m'; BD=$'\e[1m'
@@ -79,6 +79,8 @@ ${BD}Ключи${N}
   --uninstall       удалить бота (данные можно сохранить)
   --purge           снести подчистую: данные, профиль, браузер,
                     пользователя и swap, созданный установщиком
+  --fresh           переустановить с нуля: стереть и данные тоже
+                    ${D}(обычная переустановка их сохраняет)${N}
   -h, --help        эта справка
 
 ${BD}Примеры${N}
@@ -106,6 +108,7 @@ while [ $# -gt 0 ]; do
     -y|--yes) ASSUME_YES=1; shift;;
     --uninstall) UNINSTALL=1; shift;;
     --purge) PURGE=1; shift;;
+    --fresh) FRESH=1; shift;;
     -h|--help) usage; exit 0;;
     *) die "неизвестный ключ: $1 (--help)";;
   esac
@@ -203,7 +206,9 @@ if [ -z "$RECIPIENT" ] && [ -f "$DIR/.env" ]; then
 fi
 if [ -z "$OWNER" ]; then
   can_ask || die "нужен --owner (запуск без терминала)"
-  OWNER="$(ask "  Кто управляет ботом (@username или id): ")"
+  say ""
+  sub "Владелец — ТВОЙ аккаунт в Telegram, а не имя бота."
+  OWNER="$(ask "  Твой @username или числовой id: ")"
 fi
 OWNER="${OWNER#@}"
 
@@ -217,6 +222,24 @@ case "$RECIPIENT" in
   ""|@*) ;;
   *[!0-9-]*) RECIPIENT="@${RECIPIENT}";;
 esac
+
+# спрашиваем у Telegram имя бота: проверяем токен и ловим частую ошибку,
+# когда владельцем вписывают самого бота
+BOT_USERNAME=""
+if command -v curl >/dev/null 2>&1; then
+  BOT_USERNAME="$(curl -fsS --max-time 20 "https://api.telegram.org/bot${TOKEN}/getMe" 2>/dev/null | grep -o '"username":"[^"]*"' | head -1 | cut -d'"' -f4 || true)"
+fi
+if [ -n "$BOT_USERNAME" ]; then
+  ok "бот найден: @${BOT_USERNAME}"
+  if [ "${OWNER,,}" = "${BOT_USERNAME,,}" ]; then
+    die "владелец — это твой аккаунт в Telegram, а не имя бота (@${BOT_USERNAME})"
+  fi
+  if [ "${RECIPIENT#@}" = "$BOT_USERNAME" ]; then
+    die "получатель — человек или канал, а не сам бот (@${BOT_USERNAME})"
+  fi
+else
+  warn "Telegram не ответил на проверку токена — продолжаю, но проверь его"
+fi
 
 case "$MODE" in light|browser) ;; *) die "--mode должен быть light или browser";; esac
 
@@ -299,6 +322,21 @@ mkdir -p "$DIR/data"
 ok "пользователь ${SVC_USER}, каталог ${DIR}"
 
 # -------------------------------------------------------------------- файлы
+step "Прежняя установка"
+if [ -f "$UNIT" ] || systemctl is-active --quiet "${APP}.service" 2>/dev/null; then
+  systemctl stop "${APP}.service" 2>/dev/null || true
+  ok "прежний экземпляр остановлен"
+else
+  sub "прежней установки нет"
+fi
+if [ "$FRESH" = "1" ] && [ -d "$DIR" ]; then
+  rm -rf "$DIR"; mkdir -p "$DIR/data"
+  chown -R "$SVC_USER":"$SVC_USER" "$DIR" 2>/dev/null || true
+  ok "старые данные стёрты (--fresh)"
+fi
+rm -f "$DIR/bot.py" 2>/dev/null || true
+rm -rf "$DIR/__pycache__" 2>/dev/null || true
+
 step "Файлы бота"
 install -m 0644 -o "$SVC_USER" -g "$SVC_USER" "$SRC/bot.py" "$DIR/bot.py"
 PW_LINE=""
@@ -459,18 +497,14 @@ else
   say "    2. Войди в аккаунты: ${BD}${APP} login${N} (откроет браузер через SSH-туннель)"
 fi
 say ""
-say "  ${BD}Управление:${N}"
-say "    ${APP} status            состояние и самопроверка"
-say "    ${APP} logs -f           смотреть логи вживую"
-say "    ${APP} restart           перезапустить"
-say "    ${APP} config            показать настройки"
-say "    ${APP} config recipient @name   сменить и перезапустить"
-say "    ${APP} reconfigure       спросить токен/владельца/получателя заново"
-say "    ${APP} uninstall         удалить"
+say "  ${BD}Всё управление одной командой:${N}"
 say ""
-say "  ${BD}Прямо в Telegram:${N} /settings — все настройки и что можно"
-say "  менять из чата: /recipient, /interval, /ignore, /mute, /restart"
-say "  ${D}подробный лог установки: ${LOG}${N}"
+say "      ${BD}${APP}${N}"
+say ""
+say "  ${D}откроется меню: статус, логи, перезапуск, настройки, удаление${N}"
+say ""
+say "  ${BD}В Telegram:${N} /settings — настройки и что меняется прямо из чата"
+say "  ${D}лог установки: ${LOG}${N}"
 say ""
 if [ "$MODE" = "light" ]; then
   say "  ${Y}Важно:${N} Авито блокирует зарубежные дата-центры (HTTP 429)."
