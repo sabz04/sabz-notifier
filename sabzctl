@@ -5,6 +5,8 @@ set -euo pipefail
 APP="sabz-notifier"
 DIR="/opt/${APP}"
 SVC_USER="sabz"
+UNIT_PATH="/etc/systemd/system/${APP}.service"
+CLI_PATH="/usr/local/bin/${APP}"
 
 if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
   R=$'\e[31m'; G=$'\e[32m'; Y=$'\e[33m'; B=$'\e[36m'; D=$'\e[2m'; N=$'\e[0m'; BD=$'\e[1m'
@@ -45,7 +47,9 @@ ${BD}${APP}${N} — уведомления Avito и VK в Telegram
   ${APP} ${BD}config${N}            показать настройки (токен скрыт)
   ${APP} ${BD}config${N} КЛЮЧ ЗНАЧ  изменить и перезапустить
   ${APP} ${BD}reconfigure${N}       спросить всё заново
-  ${APP} ${BD}uninstall${N}         удалить бота
+  ${APP} ${BD}uninstall${N}         удалить, данные оставить
+  ${APP} ${BD}uninstall --full${N}  снести подчистую: данные, профиль,
+                             браузер, пользователя и swap установщика
 
 ${BD}Ключи для config${N}
   token       токен бота от @BotFather
@@ -110,6 +114,46 @@ cmd_config() {
   ok "${k} = ${v}"
   systemctl restart "${APP}.service" 2>/dev/null \
     && ok "бот перезапущен" || warn "служба не запущена — стартани: ${APP} start"
+}
+
+cmd_uninstall() {
+  need_root uninstall
+  local FULL=0
+  case "${1:-}" in --full|--purge|full) FULL=1;; esac
+
+  if [ "$FULL" != "1" ] && [ "${2:-}" != "-y" ] && [ -t 0 ]; then :; fi
+
+  systemctl disable --now "${APP}.service" 2>/dev/null || true
+  rm -f "$UNIT_PATH"
+  systemctl daemon-reload 2>/dev/null || true
+  ok "служба остановлена и удалена"
+
+  if [ "$FULL" = "1" ]; then
+    stray_kill
+    rm -rf "$DIR"
+    ok "каталог ${DIR} удалён вместе с данными, профилем и браузером"
+    userdel -r "$SVC_USER" 2>/dev/null || true
+    ok "пользователь ${SVC_USER} удалён"
+    if grep -q '^/swapfile' /etc/fstab 2>/dev/null && [ -f /swapfile ]; then
+      swapoff /swapfile 2>/dev/null || true
+      sed -i '\#^/swapfile#d' /etc/fstab
+      rm -f /swapfile
+      ok "swapfile, созданный установщиком, убран"
+    fi
+    rm -f "$CLI_PATH"
+    echo
+    ok "удалено полностью — следов не осталось"
+    warn "системные пакеты (python3, xvfb, novnc…) не трогал:"
+    warn "их могли ставить не мы, и на них могут опираться другие сервисы"
+  else
+    rm -f "$DIR/bot.py" "$DIR/.env"
+    rm -rf "$DIR/__pycache__"
+    ok "данные сохранены в ${DIR}/data"
+    rm -f "$CLI_PATH"
+    echo
+    ok "удалено, данные на месте"
+    printf '  %sснести подчистую:%s sudo %s uninstall --full\n' "$D" "$N" "$APP"
+  fi
 }
 
 cmd_reconfigure() {
@@ -253,8 +297,7 @@ case "${1:-help}" in
   login)     cmd_login;;
   config)    shift; cmd_config "$@";;
   reconfigure|reconf) cmd_reconfigure;;
-  uninstall) need_root uninstall
-             die "запусти install.sh --uninstall из папки репозитория";;
+  uninstall|purge) shift; cmd_uninstall "$@";;
   help|-h|--help) usage;;
   *)         usage; exit 1;;
 esac

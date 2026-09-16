@@ -88,8 +88,29 @@ sudo sabz-notifier login
 sabz-notifier status      # состояние + самопроверка
 sabz-notifier logs -f     # логи вживую
 sabz-notifier restart
-sudo ./install.sh --uninstall
 ```
+
+## Удалить
+
+Убрать бота, но сохранить данные (куки, историю, профиль браузера):
+
+```bash
+sudo sabz-notifier uninstall
+```
+
+Снести подчистую — данные, профиль, скачанный браузер, служебного пользователя
+и swap, который создавал установщик:
+
+```bash
+sudo sabz-notifier uninstall --full
+```
+
+То же самое из папки репозитория: `sudo ./install.sh --uninstall` и
+`sudo ./install.sh --purge`.
+
+Системные пакеты (`python3`, `xvfb`, `novnc` и прочие) не трогаются даже при
+полном удалении — их могли ставить не мы, и от них могут зависеть другие
+сервисы на машине. Если уверен, что они больше не нужны, снимай их вручную.
 
 ## Изменить настройки
 

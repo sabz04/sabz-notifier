@@ -22,7 +22,7 @@ else
 fi
 
 TOKEN=""; OWNER=""; RECIPIENT=""; MODE="light"; INTERVAL="25"
-DO_SWAP=1; DO_START=1; ASSUME_YES=0; FORCE=0; UNINSTALL=0; QUIET=0
+DO_SWAP=1; DO_START=1; ASSUME_YES=0; FORCE=0; UNINSTALL=0; PURGE=0; QUIET=0
 
 if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
   R=$'\e[31m'; G=$'\e[32m'; Y=$'\e[33m'; B=$'\e[36m'; D=$'\e[2m'; N=$'\e[0m'; BD=$'\e[1m'
@@ -77,6 +77,8 @@ ${BD}Ключи${N}
   --branch NAME     ветка ${D}(${GH_BRANCH})${N}
   -y, --yes         не задавать вопросов
   --uninstall       удалить бота (данные можно сохранить)
+  --purge           снести подчистую: данные, профиль, браузер,
+                    пользователя и swap, созданный установщиком
   -h, --help        эта справка
 
 ${BD}Примеры${N}
@@ -103,6 +105,7 @@ while [ $# -gt 0 ]; do
     --branch) GH_BRANCH="${2:-}"; shift 2;;
     -y|--yes) ASSUME_YES=1; shift;;
     --uninstall) UNINSTALL=1; shift;;
+    --purge) PURGE=1; shift;;
     -h|--help) usage; exit 0;;
     *) die "неизвестный ключ: $1 (--help)";;
   esac
@@ -120,21 +123,40 @@ chmod 600 "$LOG" 2>/dev/null || true
 printf '\n===== %s =====\n' "$(date -Is)" >>"$LOG" 2>/dev/null || true
 
 # ------------------------------------------------------------------ удаление
-if [ "$UNINSTALL" = "1" ]; then
+if [ "$UNINSTALL" = "1" ] || [ "$PURGE" = "1" ]; then
   step "Удаляю ${APP}"
   systemctl disable --now "${APP}.service" 2>/dev/null || true
   rm -f "$UNIT" "$CLI"; systemctl daemon-reload || true
   ok "служба и команда удалены"
-  if [ -d "$DIR" ]; then
-    keep="y"
-    if [ "$ASSUME_YES" != "1" ] && can_ask; then
-      a="$(ask "  Сохранить данные в ${DIR}/data (куки, история)? [Y/n] ")"
-      case "${a:-y}" in [Nn]*) keep="n";; esac
-    fi
-    if [ "$keep" = "n" ]; then rm -rf "$DIR"; ok "каталог ${DIR} удалён"
-    else rm -f "$DIR"/bot.py "$DIR"/.env; ok "данные сохранены в ${DIR}/data"; fi
+  keep="y"
+  if [ "$PURGE" = "1" ]; then
+    keep="n"
+  elif [ -d "$DIR" ] && [ "$ASSUME_YES" != "1" ] && can_ask; then
+    a="$(ask "  Сохранить данные в ${DIR}/data (куки, история)? [Y/n] ")"
+    case "${a:-y}" in [Nn]*) keep="n";; esac
   fi
-  say ""; say "${G}Готово.${N} Пользователь ${SVC_USER} и swap не тронуты."
+  if [ "$keep" = "n" ]; then
+    rm -rf "$DIR"; ok "каталог ${DIR} удалён вместе с данными и браузером"
+  elif [ -d "$DIR" ]; then
+    rm -f "$DIR"/bot.py "$DIR"/.env; ok "данные сохранены в ${DIR}/data"
+  fi
+  if [ "$PURGE" = "1" ]; then
+    userdel -r "$SVC_USER" 2>/dev/null || true
+    ok "пользователь ${SVC_USER} удалён"
+    if grep -q '^/swapfile' /etc/fstab 2>/dev/null && [ -f /swapfile ]; then
+      swapoff /swapfile 2>/dev/null || true
+      sed -i '\#^/swapfile#d' /etc/fstab
+      rm -f /swapfile
+      ok "swapfile, созданный установщиком, убран"
+    fi
+    say ""
+    say "${G}Удалено полностью.${N} Системные пакеты не трогал —"
+    say "их могли ставить не мы, и от них могут зависеть другие сервисы."
+  else
+    say ""
+    say "${G}Готово.${N} Данные, пользователь ${SVC_USER} и swap на месте."
+    say "  ${D}снести подчистую: sudo ./install.sh --purge${N}"
+  fi
   exit 0
 fi
 

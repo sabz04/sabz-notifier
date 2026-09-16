@@ -1384,7 +1384,9 @@ def handle(msg):
              "<code>/restart</code> — перезапустить бота\n\n"
              "Токен, владельца и режим меняют на сервере:\n"
              "<code>sabz-notifier config recipient @name</code>\n"
-             "<code>sabz-notifier reconfigure</code> — спросит всё заново"
+             "<code>sabz-notifier reconfigure</code> — спросит всё заново\n\n"
+             "Удалить: <code>sabz-notifier uninstall</code> — данные останутся,\n"
+             "<code>sabz-notifier uninstall --full</code> — снести подчистую"
              % (esc(MODE), " (headless)" if HEADLESS else "",
                 esc(("@" + OWNER) if OWNER else "не задан"),
                 esc(eff_recipient() or "этот чат"),
