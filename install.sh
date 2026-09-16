@@ -7,10 +7,22 @@ DIR="/opt/${APP}"
 SVC_USER="sabz"
 UNIT="/etc/systemd/system/${APP}.service"
 CLI="/usr/local/bin/${APP}"
-SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LOG="/var/log/${APP}-install.log"
+
+# откуда брать исходники, если скрипт запущен ссылкой: curl … | bash
+GH_REPO="${GH_REPO:-sabz04/sabz-notifier}"
+GH_BRANCH="${GH_BRANCH:-vps}"
+
+# при запуске через pipe BASH_SOURCE указывает не на файл — тогда SRC пуст
+_self="${BASH_SOURCE[0]:-}"
+if [ -n "$_self" ] && [ -f "$_self" ]; then
+  SRC="$(cd "$(dirname "$_self")" && pwd)"
+else
+  SRC=""
+fi
 
 TOKEN=""; OWNER=""; MODE="light"; INTERVAL="25"
-DO_SWAP=1; DO_START=1; ASSUME_YES=0; FORCE=0; UNINSTALL=0
+DO_SWAP=1; DO_START=1; ASSUME_YES=0; FORCE=0; UNINSTALL=0; QUIET=0
 
 if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
   R=$'\e[31m'; G=$'\e[32m'; Y=$'\e[33m'; B=$'\e[36m'; D=$'\e[2m'; N=$'\e[0m'; BD=$'\e[1m'
@@ -21,6 +33,27 @@ step() { printf '%s==>%s %s%s%s\n' "$B" "$N" "$BD" "$*" "$N"; }
 ok()   { printf '  %s✓%s %s\n' "$G" "$N" "$*"; }
 warn() { printf '  %s!%s %s\n' "$Y" "$N" "$*"; }
 die()  { printf '  %s✗%s %s\n' "$R" "$N" "$*" >&2; exit 1; }
+sub()  { printf '  %s%s%s\n' "$D" "$*" "$N"; }
+
+# вопрос пользователю: работает и когда скрипт пришёл по конвейеру (curl | bash)
+ask() {
+  local a=""
+  if [ -t 0 ]; then read -r -p "$1" a
+  elif [ -r /dev/tty ]; then read -r -p "$1" a </dev/tty
+  fi
+  printf '%s' "$a"
+}
+can_ask() { [ -t 0 ] || [ -r /dev/tty ]; }
+
+# выполняет команду, показывая её вывод (прогресс закачки виден как есть)
+show() {
+  if [ "$QUIET" = "1" ]; then
+    "$@" >>"$LOG" 2>&1
+  else
+    "$@" 2>&1 | tee -a "$LOG"
+    return "${PIPESTATUS[0]}"
+  fi
+}
 
 usage() {
   cat <<EOF
@@ -37,12 +70,19 @@ ${BD}Ключи${N}
   --no-swap         не создавать swap на машине с малой памятью
   --no-start        установить, но не запускать
   --force           игнорировать предупреждения о ресурсах
+  -q, --quiet       без подробного вывода (всё пишется в ${LOG})
+  --repo O/R        репозиторий с исходниками ${D}(${GH_REPO})${N}
+  --branch NAME     ветка ${D}(${GH_BRANCH})${N}
   -y, --yes         не задавать вопросов
   --uninstall       удалить бота (данные можно сохранить)
   -h, --help        эта справка
 
-${BD}Пример${N}
+${BD}Примеры${N}
   sudo ./install.sh --token 123:AA... --owner sabzrr --mode light -y
+
+  ${D}# прямо с гитхаба, без клонирования:${N}
+  curl -fsSL https://raw.githubusercontent.com/${GH_REPO}/${GH_BRANCH}/install.sh \\
+    | sudo bash -s -- --token 123:AA... --owner sabzrr
 EOF
 }
 
@@ -55,6 +95,9 @@ while [ $# -gt 0 ]; do
     --no-swap) DO_SWAP=0; shift;;
     --no-start) DO_START=0; shift;;
     --force) FORCE=1; shift;;
+    -q|--quiet) QUIET=1; shift;;
+    --repo) GH_REPO="${2:-}"; shift 2;;
+    --branch) GH_BRANCH="${2:-}"; shift 2;;
     -y|--yes) ASSUME_YES=1; shift;;
     --uninstall) UNINSTALL=1; shift;;
     -h|--help) usage; exit 0;;
@@ -68,6 +111,11 @@ done
 if command -v runuser >/dev/null 2>&1; then AS_USER=(runuser -u "$SVC_USER" --)
 else AS_USER=(sudo -u "$SVC_USER"); fi
 
+touch "$LOG" 2>/dev/null || LOG="/tmp/${APP}-install.log"
+touch "$LOG" 2>/dev/null || true
+chmod 600 "$LOG" 2>/dev/null || true
+printf '\n===== %s =====\n' "$(date -Is)" >>"$LOG" 2>/dev/null || true
+
 # ------------------------------------------------------------------ удаление
 if [ "$UNINSTALL" = "1" ]; then
   step "Удаляю ${APP}"
@@ -76,8 +124,8 @@ if [ "$UNINSTALL" = "1" ]; then
   ok "служба и команда удалены"
   if [ -d "$DIR" ]; then
     keep="y"
-    if [ "$ASSUME_YES" != "1" ] && [ -t 0 ]; then
-      read -r -p "  Сохранить данные в ${DIR}/data (куки, история)? [Y/n] " a || true
+    if [ "$ASSUME_YES" != "1" ] && can_ask; then
+      a="$(ask "  Сохранить данные в ${DIR}/data (куки, история)? [Y/n] ")"
       case "${a:-y}" in [Nn]*) keep="n";; esac
     fi
     if [ "$keep" = "n" ]; then rm -rf "$DIR"; ok "каталог ${DIR} удалён"
@@ -91,16 +139,34 @@ say ""
 say "${BD}  sabz-notifier${N} ${D}— уведомления Avito и VK в Telegram${N}"
 say ""
 
+# ----------------------------------------------------------------- исходники
+if [ -z "$SRC" ] || [ ! -f "$SRC/bot.py" ]; then
+  step "Исходники"
+  sub "bot.py рядом нет — забираю из ${GH_REPO}@${GH_BRANCH}"
+  if ! command -v curl >/dev/null 2>&1 && command -v apt-get >/dev/null 2>&1; then
+    DEBIAN_FRONTEND=noninteractive apt-get update -qq >>"$LOG" 2>&1 || true
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl >>"$LOG" 2>&1 || true
+  fi
+  command -v curl >/dev/null 2>&1 || die "нужен curl"
+  SRC="$(mktemp -d)"
+  RAW="https://raw.githubusercontent.com/${GH_REPO}/${GH_BRANCH}"
+  for f in bot.py sabzctl; do
+    curl -fSL --progress-bar "$RAW/$f" -o "$SRC/$f" \
+      || die "не скачался ${f} — проверь --repo/--branch и доступность репозитория"
+    ok "получен ${f} ($(wc -c <"$SRC/$f") байт)"
+  done
+  chmod +x "$SRC/sabzctl"
+fi
+
 # ------------------------------------------------------------------- вводные
-[ -f "$SRC/bot.py" ] || die "рядом нет bot.py — запускай install.sh из папки репозитория"
 
 if [ -z "$TOKEN" ] && [ -f "$DIR/.env" ]; then
   TOKEN="$(grep -E '^TG_TOKEN=' "$DIR/.env" | cut -d= -f2- || true)"
   [ -n "$TOKEN" ] && ok "токен взят из установленного ранее .env"
 fi
 if [ -z "$TOKEN" ]; then
-  [ -t 0 ] || die "нужен --token (неинтерактивный запуск)"
-  read -r -p "  Токен бота от @BotFather: " TOKEN
+  can_ask || die "нужен --token (запуск без терминала)"
+  TOKEN="$(ask "  Токен бота от @BotFather: ")"
 fi
 [[ "$TOKEN" == *:* ]] || die "токен не похож на токен (ожидается 123456:AA...)"
 
@@ -108,27 +174,39 @@ if [ -z "$OWNER" ] && [ -f "$DIR/.env" ]; then
   OWNER="$(grep -E '^TG_OWNER=' "$DIR/.env" | cut -d= -f2- || true)"
 fi
 if [ -z "$OWNER" ]; then
-  [ -t 0 ] || die "нужен --owner (неинтерактивный запуск)"
-  read -r -p "  Твой telegram-username без @: " OWNER
+  can_ask || die "нужен --owner (запуск без терминала)"
+  OWNER="$(ask "  Твой telegram-username без @: ")"
 fi
 OWNER="${OWNER#@}"
 
 case "$MODE" in light|browser) ;; *) die "--mode должен быть light или browser";; esac
 
 RAM_MB=$(awk '/MemTotal/{printf "%d", $2/1024}' /proc/meminfo)
-if [ "$MODE" = "browser" ] && [ "$RAM_MB" -lt 1800 ] && [ "$FORCE" != "1" ]; then
-  warn "на машине ${RAM_MB} МБ RAM — браузерный режим требует ~2 ГБ."
-  warn "поставлю лёгкий режим. Нужен всё равно браузерный — добавь --force."
-  MODE="light"
+SWAP_MB=$(awk '/SwapTotal/{printf "%d", $2/1024}' /proc/meminfo)
+# swap учитываем: с ним браузер живёт, пусть и медленнее
+EFFECTIVE_MB=$((RAM_MB + SWAP_MB))
+if [ "$MODE" = "browser" ]; then
+  if [ "$RAM_MB" -lt 1800 ] && [ "$EFFECTIVE_MB" -lt 2600 ] && [ "$FORCE" != "1" ]; then
+    warn "${RAM_MB} МБ RAM и ${SWAP_MB} МБ swap — браузеру мало."
+    warn "ставлю лёгкий режим. Нужен браузерный — запусти ещё раз с --force"
+    warn "(скрипт добавит swap, и со второго прохода браузерный пройдёт сам)."
+    MODE="light"
+  elif [ "$RAM_MB" -lt 1800 ]; then
+    warn "${RAM_MB} МБ RAM — браузер будет жить за счёт swap, ожидай медлительности."
+  fi
 fi
+
+PW_PATH="${DIR}/ms-playwright"
+if [ "$MODE" = "browser" ]; then PY_BIN="${DIR}/venv/bin/python3"
+else PY_BIN="/usr/bin/python3"; fi
 
 say ""
 say "  режим:     ${BD}${MODE}${N}   владелец: ${BD}@${OWNER}${N}   опрос: ${BD}${INTERVAL}с${N}"
 say "  каталог:   ${DIR}"
 say "  память:    ${RAM_MB} МБ"
 say ""
-if [ "$ASSUME_YES" != "1" ] && [ -t 0 ]; then
-  read -r -p "  Продолжаем? [Y/n] " a || true
+if [ "$ASSUME_YES" != "1" ] && can_ask; then
+  a="$(ask "  Продолжаем? [Y/n] ")"
   case "${a:-y}" in [Nn]*) say "отменено"; exit 0;; esac
 fi
 
@@ -138,13 +216,15 @@ if command -v apt-get >/dev/null 2>&1; then
   export DEBIAN_FRONTEND=noninteractive
   PKGS="python3 ca-certificates"
   [ "$MODE" = "browser" ] && PKGS="$PKGS python3-pip python3-venv xvfb x11vnc novnc websockify fonts-liberation"
-  apt-get update -qq
+  sub "обновляю список пакетов…"
+  show apt-get update -q
+  sub "ставлю: $PKGS"
   # shellcheck disable=SC2086
-  apt-get install -y -qq $PKGS >/dev/null
-  ok "установлены: $PKGS"
+  show apt-get install -y $PKGS || die "apt не смог поставить пакеты (подробности в $LOG)"
+  ok "пакеты готовы"
 elif command -v dnf >/dev/null 2>&1; then
-  dnf install -y -q python3 ca-certificates >/dev/null
-  ok "установлены: python3"
+  show dnf install -y python3 ca-certificates || die "dnf не смог поставить пакеты"
+  ok "пакеты готовы"
 else
   warn "неизвестный пакетный менеджер — проверь, что есть python3"
 fi
@@ -153,7 +233,6 @@ ok "python: $(python3 --version 2>&1)"
 
 # --------------------------------------------------------------------- swap
 step "Память и swap"
-SWAP_MB=$(awk '/SwapTotal/{printf "%d", $2/1024}' /proc/meminfo)
 if [ "$SWAP_MB" -gt 0 ]; then
   ok "swap уже есть: ${SWAP_MB} МБ"
 elif [ "$DO_SWAP" != "1" ]; then
@@ -181,6 +260,8 @@ ok "пользователь ${SVC_USER}, каталог ${DIR}"
 # -------------------------------------------------------------------- файлы
 step "Файлы бота"
 install -m 0644 -o "$SVC_USER" -g "$SVC_USER" "$SRC/bot.py" "$DIR/bot.py"
+PW_LINE=""
+[ "$MODE" = "browser" ] && PW_LINE="PLAYWRIGHT_BROWSERS_PATH=${PW_PATH}"
 umask 077
 cat > "$DIR/.env" <<EOF
 TG_TOKEN=${TOKEN}
@@ -188,6 +269,7 @@ TG_OWNER=${OWNER}
 BOT_MODE=${MODE}
 BOT_DATA=${DIR}/data
 BOT_HEADLESS=$([ "$MODE" = "browser" ] && echo 1 || echo "")
+${PW_LINE}
 PYTHONIOENCODING=utf-8
 EOF
 chown root:"$SVC_USER" "$DIR/.env"; chmod 640 "$DIR/.env"
@@ -197,16 +279,61 @@ ok "bot.py и .env на месте (.env читает только служба)
 # ---------------------------------------------------------------- playwright
 if [ "$MODE" = "browser" ]; then
   step "Браузер для бота"
-  if ! "${AS_USER[@]}" python3 -c "import playwright" 2>/dev/null; then
-    pip3 install --quiet --break-system-packages playwright 2>/dev/null \
-      || pip3 install --quiet playwright
-    ok "playwright установлен"
-  else ok "playwright уже установлен"; fi
-  if "${AS_USER[@]}" env HOME="$DIR" python3 -m playwright install chromium >/dev/null 2>&1; then
-    ok "chromium загружен"
+
+  # своё окружение, чтобы не трогать системный python
+  if [ ! -x "$PY_BIN" ]; then
+    python3 -m venv "$DIR/venv" >/dev/null 2>&1 || die "не создать venv (нужен пакет python3-venv)"
+    ok "создано окружение ${DIR}/venv"
+  else ok "окружение уже есть"; fi
+  show "$DIR/venv/bin/pip" install --upgrade pip || true
+  if ! "$PY_BIN" -c "import playwright" 2>/dev/null; then
+    sub "ставлю playwright…"
+    show "$DIR/venv/bin/pip" install playwright || die "не установить playwright"
+  fi
+  ok "playwright $("$PY_BIN" -c 'from importlib.metadata import version; print(version("playwright"))' 2>/dev/null || echo "установлен")"
+
+  # браузер кладём в предсказуемое место внутри каталога бота
+  mkdir -p "$PW_PATH"
+  say "  ${D}качаю chromium и системные библиотеки (это долго на слабой машине)…${N}"
+  PW_OK=0
+  # --with-deps ставит недостающие библиотеки через apt — поэтому от root
+  for attempt in \
+      "$DIR/venv/bin/playwright install --with-deps chromium" \
+      "$PY_BIN -m playwright install --with-deps chromium" \
+      "$DIR/venv/bin/playwright install chromium"; do
+    rc=0
+    # shellcheck disable=SC2086
+    if [ "$QUIET" = "1" ]; then
+      PLAYWRIGHT_BROWSERS_PATH="$PW_PATH" $attempt >>"$LOG" 2>&1 || rc=$?
+    else
+      PLAYWRIGHT_BROWSERS_PATH="$PW_PATH" $attempt 2>&1 | tee -a "$LOG" || rc=$?
+    fi
+    [ "$rc" = "0" ] && { PW_OK=1; break; } || true
+  done
+  if [ "$PW_OK" = "1" ]; then ok "chromium и зависимости установлены"
   else
-    warn "chromium не загрузился — доустанови вручную:"
-    warn "  runuser -u ${SVC_USER} -- env HOME=${DIR} python3 -m playwright install chromium"
+    warn "не удалось поставить chromium. Последние строки из ${LOG}:"
+    tail -8 "$LOG" 2>/dev/null | sed 's/^/      /'
+    die "останавливаюсь — без браузера режим browser не заработает"
+  fi
+  chown -R "$SVC_USER":"$SVC_USER" "$PW_PATH" "$DIR/venv"
+
+  # настоящая проверка: реально ли запускается браузер от имени службы
+  say "  ${D}проверяю запуск браузера…${N}"
+  if "${AS_USER[@]}" env HOME="$DIR" PLAYWRIGHT_BROWSERS_PATH="$PW_PATH" \
+      "$PY_BIN" - >/tmp/pw_smoke.log 2>&1 <<'PYEOF'
+from playwright.sync_api import sync_playwright
+with sync_playwright() as pw:
+    b = pw.chromium.launch(headless=True,
+                           args=["--no-sandbox", "--disable-dev-shm-usage"])
+    print(b.version)
+    b.close()
+PYEOF
+  then ok "браузер запускается: $(tail -1 /tmp/pw_smoke.log)"
+  else
+    warn "браузер не стартует. Последние строки:"
+    tail -6 /tmp/pw_smoke.log 2>/dev/null | sed 's/^/      /'
+    die "останавливаюсь — режим browser не готов"
   fi
 fi
 
@@ -227,7 +354,7 @@ User=${SVC_USER}
 Group=${SVC_USER}
 WorkingDirectory=${DIR}
 Environment=HOME=${DIR}
-ExecStart=/usr/bin/python3 -u ${DIR}/bot.py
+ExecStart=${PY_BIN} -u ${DIR}/bot.py
 Restart=always
 RestartSec=10
 MemoryMax=${MEM_MAX}
@@ -258,7 +385,7 @@ else warn "sabzctl не найден рядом — команда ${APP} не �
 # -------------------------------------------------------------- самопроверка
 step "Самопроверка"
 set +e
-"${AS_USER[@]}" env HOME="$DIR" python3 "$DIR/bot.py" --selfcheck 2>&1 | sed 's/^/  /'
+"${AS_USER[@]}" env HOME="$DIR" "$PY_BIN" "$DIR/bot.py" --selfcheck 2>&1 | sed 's/^/  /'
 CHECK=${PIPESTATUS[0]}
 set -e
 [ "$CHECK" = "0" ] || warn "самопроверка нашла проблемы (см. выше)"
@@ -291,6 +418,7 @@ else
 fi
 say ""
 say "  ${BD}Управление:${N}  ${APP} status | logs | restart | selfcheck | uninstall"
+say "  ${D}подробный лог установки: ${LOG}${N}"
 say ""
 if [ "$MODE" = "light" ]; then
   say "  ${Y}Важно:${N} Авито блокирует зарубежные дата-центры (HTTP 429)."

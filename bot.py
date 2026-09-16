@@ -575,7 +575,25 @@ class SessionDead(Exception):
 
 
 class Blocked(Exception):
+    """Сайт показал проверку «вы не робот» — её проходит человек, не бот."""
     pass
+
+
+_BLOCK_PAGE = re.compile(
+    r"Доступ ограничен|проблема с IP|не робот|Проверка безопасности", re.I)
+
+
+def blocked_hint():
+    """Что делать владельцу, чтобы снять проверку. Зависит от режима."""
+    if MODE == "browser":
+        return ("Проверку нужно пройти вручную в окне браузера бота — "
+                "открой его и нажми кнопку.\nНа сервере: "
+                "<code>sabz-notifier login</code>, дальше по SSH-туннелю.")
+    return ("Проверку нужно пройти <b>с того же IP, с которого ходит бот</b> — "
+            "домашний браузер тут не поможет.\nНа сервере: поставь режим "
+            "<code>browser</code> и пройди её через "
+            "<code>sabz-notifier login</code>, либо задай выход в РФ: "
+            "<code>/proxy avito http://user:pass@host:port</code>")
 
 
 class Transient(Exception):
@@ -607,10 +625,12 @@ class ReplaySource(Source):
         if st in (401, 403):
             raise SessionDead("HTTP %s — куки больше не действуют" % st)
         if st == 429:
-            raise Blocked("HTTP 429 — сайт ограничил этот IP")
+            raise Blocked("HTTP 429 — Авито просит пройти проверку с этого IP")
         if st >= 400:
             raise Transient("HTTP %s" % st)
         text = raw.decode("utf-8", "replace")
+        if _BLOCK_PAGE.search(text[:8000]):
+            raise Blocked("вместо данных пришла страница проверки Авито")
         try:
             body = json.loads(text)
         except Exception:
@@ -821,9 +841,12 @@ AVITO_EXTRACT_JS = r"""
                 unread: read === 'false', outgoing: outgoing });
   });
   const bt = document.body ? document.body.innerText : '';
+  const ttl = document.title || '';
   return { rows: rows,
            logged: !!document.querySelector('[data-marker^="channels/"]'),
-           login: /Войти в личный кабинет|Войти по паролю|Введите телефон/.test(bt) };
+           login: /Войти в личный кабинет|Войти по паролю|Введите телефон/.test(bt),
+           blocked: /Доступ ограничен|проблема с IP|не робот|Проверка безопасности|подозрительн/i
+                      .test(bt + ' ' + ttl) };
 }
 """
 
@@ -856,6 +879,12 @@ class BrowserAvitoSource(Source):
                 hub.reset()
                 raise Transient("окно браузера закрылось — переоткрываю")
             raise Transient("браузер Avito: %s" % str(e)[:120])
+        if res.get("blocked"):
+            try:
+                pg.bring_to_front()
+            except Exception:
+                pass
+            raise Blocked("Авито показывает проверку «подтвердите, что вы не робот»")
         if not res.get("logged"):
             if res.get("login"):
                 raise SessionDead("нужно войти в Авито в окне браузера бота")
@@ -1076,10 +1105,15 @@ def source_loop():
                     n = poll_once(src)
                     if n:
                         log("%s: %d новых" % (src.name, n))
-                    if st.get("dead"):
+                    if st.get("dead") or st.get("blocked"):
+                        was_blocked = st.get("blocked")
                         st["dead"] = False
+                        st["blocked"] = False
                         save_state()
-                        send("✅ <b>%s</b>: связь восстановлена." % esc(src.name))
+                        send("✅ <b>%s</b>: %s" % (
+                            esc(src.name),
+                            "проверка пройдена, слежу дальше." if was_blocked
+                            else "связь восстановлена."))
                     backoff.pop(src.name, None)
                 except SessionDead as e:
                     if not st.get("dead"):
@@ -1091,7 +1125,15 @@ def source_loop():
                     backoff[src.name] = time.time() + 600
                     log("%s DEAD: %s" % (src.name, e))
                 except Blocked as e:
-                    backoff[src.name] = time.time() + 900
+                    now = time.time()
+                    if not st.get("blocked") \
+                            or (now - st.get("blocked_at", 0)) > 3600:
+                        st["blocked"] = True
+                        st["blocked_at"] = now
+                        save_state()
+                        send("🚧 <b>%s</b>: %s\n\n%s"
+                             % (esc(src.name), esc(e), blocked_hint()))
+                    backoff[src.name] = now + 300
                     log("%s BLOCKED: %s" % (src.name, e))
                 except Transient as e:
                     backoff[src.name] = time.time() + 120
@@ -1237,7 +1279,9 @@ def handle(msg):
             lines.append("\n<i>источники не настроены</i>")
         for n, c in (cfg.get("sources") or {}).items():
             s = state.get(n, {})
-            if s.get("dead"):
+            if s.get("blocked"):
+                st_txt = "🚧 ждёт прохождения проверки «не робот»"
+            elif s.get("dead"):
                 st_txt = "❌ нужен вход в окне браузера" \
                     if c.get("kind") == "browser" else "❌ нужен новый доступ"
             else:

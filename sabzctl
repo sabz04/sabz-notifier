@@ -15,7 +15,23 @@ warn() { printf '  %s!%s %s\n' "$Y" "$N" "$*"; }
 die()  { printf '  %s✗%s %s\n' "$R" "$N" "$*" >&2; exit 1; }
 need_root() { [ "$(id -u)" = "0" ] || die "нужен root: sudo ${APP} $1"; }
 
+# добивает процессы прошлого входа: свой дисплей :99 и свой порт 6080
+stray_kill() {
+  pkill -f 'Xvfb :99' 2>/dev/null || true
+  pkill -f 'x11vnc -display :99' 2>/dev/null || true
+  pkill -f 'websockify.*6080' 2>/dev/null || true
+  return 0
+}
+
 mode() { grep -E '^BOT_MODE=' "$DIR/.env" 2>/dev/null | cut -d= -f2- || echo light; }
+envval() { grep -E "^$1=" "$DIR/.env" 2>/dev/null | cut -d= -f2- || true; }
+
+PY="${DIR}/venv/bin/python3"; [ -x "$PY" ] || PY="/usr/bin/python3"
+PW_PATH="$(envval PLAYWRIGHT_BROWSERS_PATH)"
+if command -v runuser >/dev/null 2>&1; then AS_USER=(runuser -u "$SVC_USER" --)
+else AS_USER=(sudo -u "$SVC_USER"); fi
+as_bot() { "${AS_USER[@]}" env HOME="$DIR" \
+  ${PW_PATH:+PLAYWRIGHT_BROWSERS_PATH="$PW_PATH"} "$@"; }
 
 usage() {
   cat <<EOF
@@ -39,7 +55,7 @@ cmd_status() {
   [ "$mem" -gt 0 ] && printf '  %sпамять:%s %s МБ\n' "$D" "$N" "$((mem/1048576))"
   printf '  %sрежим:%s %s\n' "$D" "$N" "$(mode)"
   echo
-  sudo -u "$SVC_USER" env HOME="$DIR" python3 "$DIR/bot.py" --selfcheck 2>&1 | sed 's/^/  /' || true
+  as_bot "$PY" "$DIR/bot.py" --selfcheck 2>&1 | sed 's/^/  /' || true
   echo
   printf '  %sпоследние строки лога:%s\n' "$D" "$N"
   journalctl -u "${APP}.service" -n 8 --no-pager -o cat 2>/dev/null | sed 's/^/    /' || true
@@ -55,15 +71,34 @@ cmd_login() {
   [ -d "$NOVNC" ] || NOVNC=/usr/share/webapps/novnc
   [ -d "$NOVNC" ] || die "не нашёл novnc"
 
-  echo "  Останавливаю бота, чтобы освободить профиль браузера..."
-  systemctl stop "${APP}.service" 2>/dev/null || true
+  WAS_ACTIVE=0
+  systemctl is-active --quiet "${APP}.service" && WAS_ACTIVE=1
+  if [ "$WAS_ACTIVE" = "1" ]; then
+    echo "  Останавливаю бота, чтобы освободить профиль браузера..."
+    systemctl stop "${APP}.service" 2>/dev/null || true
+  fi
 
-  local tmp; tmp="$(mktemp -d)"
+  # подчистим хвосты прошлого входа, иначе :99 будет занят
+  stray_kill
+
+  tmp="$(mktemp -d)"           # намеренно глобальная: нужна в trap
+  CLEANED=0
   cleanup() {
-    kill "${WS_PID:-}" "${VNC_PID:-}" "${X_PID:-}" "${PY_PID:-}" 2>/dev/null || true
-    rm -rf "$tmp"
-    systemctl start "${APP}.service" 2>/dev/null || true
-    echo; ok "бот снова запущен"
+    [ "${CLEANED:-0}" = "1" ] && return 0
+    CLEANED=1
+    for p in "${PY_PID:-}" "${WS_PID:-}" "${VNC_PID:-}" "${X_PID:-}"; do
+      [ -n "$p" ] && kill "$p" 2>/dev/null
+    done
+    sleep 1
+    stray_kill
+    [ -n "${tmp:-}" ] && rm -rf "$tmp"
+    if [ "$WAS_ACTIVE" = "1" ]; then
+      systemctl start "${APP}.service" 2>/dev/null || true
+      echo; ok "бот снова запущен"
+    else
+      echo; ok "готово (служба была остановлена — не трогаю)"
+    fi
+    return 0
   }
   trap cleanup EXIT INT TERM
 
@@ -98,9 +133,10 @@ with sync_playwright() as pw:
     while True:
         p.wait_for_timeout(5000)
 PYEOF
-  chown -R "$SVC_USER":"$SVC_USER" "$tmp"
-  sudo -u "$SVC_USER" env DISPLAY=:99 HOME="$DIR" BOT_DIR="$DIR" \
-      python3 "$tmp/login.py" >"$tmp/out" 2>&1 & PY_PID=$!
+  chmod 755 "$tmp"; chown -R "$SVC_USER":"$SVC_USER" "$tmp"
+  "${AS_USER[@]}" env DISPLAY=:99 HOME="$DIR" BOT_DIR="$DIR" \
+      ${PW_PATH:+PLAYWRIGHT_BROWSERS_PATH="$PW_PATH"} \
+      "$PY" "$tmp/login.py" >"$tmp/out" 2>&1 & PY_PID=$!
   for _ in $(seq 1 30); do grep -q BROWSER_READY "$tmp/out" 2>/dev/null && break; sleep 1; done
 
   echo
@@ -124,7 +160,7 @@ case "${1:-help}" in
   start)     need_root start; systemctl start "${APP}.service"; ok "запущен";;
   stop)      need_root stop; systemctl stop "${APP}.service"; ok "остановлен";;
   restart)   need_root restart; systemctl restart "${APP}.service"; ok "перезапущен";;
-  selfcheck) sudo -u "$SVC_USER" env HOME="$DIR" python3 "$DIR/bot.py" --selfcheck;;
+  selfcheck) as_bot "$PY" "$DIR/bot.py" --selfcheck;;
   login)     cmd_login;;
   config)    sed -E 's/^(TG_TOKEN=).*/\1<скрыт>/' "$DIR/.env";;
   uninstall) need_root uninstall
