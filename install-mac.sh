@@ -97,6 +97,7 @@ touch "$LOG" 2>/dev/null || true
 # ------------------------------------------------------------------ удаление
 if [ "$UNINSTALL" = "1" ] || [ "$PURGE" = "1" ]; then
   step "Удаляю ${APP}"
+  launchctl bootout "gui/$(id -u)/${LABEL}" 2>/dev/null || true
   launchctl unload -w "$PLIST" 2>/dev/null || true
   launchctl remove "$LABEL" 2>/dev/null || true
   rm -f "$PLIST"
@@ -192,6 +193,7 @@ ok "python: $(python3 --version 2>&1)"
 # ------------------------------------------------------- прежняя установка
 step "Прежняя установка"
 if [ -f "$PLIST" ]; then
+  launchctl bootout "gui/$(id -u)/${LABEL}" 2>/dev/null || true
   launchctl unload -w "$PLIST" 2>/dev/null || true
   ok "прежний экземпляр остановлен"
 else
@@ -306,11 +308,21 @@ step "Самопроверка"
 # ---------------------------------------------------------------------- пуск
 if [ "$DO_START" = "1" ]; then
   step "Запуск"
+  GUI="gui/$(id -u)"
+  launchctl bootout "${GUI}/${LABEL}" 2>/dev/null || true
   launchctl unload -w "$PLIST" 2>/dev/null || true
-  launchctl load -w "$PLIST" 2>/dev/null || die "launchctl не смог загрузить агент"
-  sleep 4
-  if launchctl list 2>/dev/null | grep -q "$LABEL"; then ok "бот запущен"
-  else warn "бот не поднялся — смотри ${DIR}/bot.log"; fi
+  if ! launchctl bootstrap "$GUI" "$PLIST" 2>/dev/null; then
+    launchctl load -w "$PLIST" 2>/dev/null || die "launchctl не смог загрузить агент"
+  fi
+  sleep 5
+  if launchctl list 2>/dev/null | grep -q "$LABEL"; then
+    ok "бот запущен"
+  else
+    warn "агент не виден в launchctl. Последние строки лога:"
+    tail -15 "${DIR}/bot.log" 2>/dev/null | sed 's/^/      /' || true
+    warn "запусти вручную, чтобы увидеть ошибку:"
+    warn "  ${PY_BIN} ${DIR}/bot.py"
+  fi
 else
   warn "не запускаю (--no-start). Старт: launchctl load -w ${PLIST}"
 fi

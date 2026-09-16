@@ -866,7 +866,10 @@ def source_loop():
                 stop_login_session()
 
             srcs = build_sources()
-            if not cfg.get("chat_id") or not srcs:
+            # раньше ждали chat_id, то есть /start от владельца, — и браузер
+            # не открывался вовсе. Получателя знаем уже при установке, этого
+            # хватает, чтобы начать работу и показать окно для входа.
+            if not srcs or not notify_target():
                 time.sleep(5)
                 continue
             for src in srcs:
