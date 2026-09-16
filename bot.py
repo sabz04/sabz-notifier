@@ -6,6 +6,7 @@ sabzNotifierBot - лёгкий уведомитель о новых сообще
 """
 import os
 import re
+import sys
 import ssl
 import json
 import gzip
@@ -48,6 +49,18 @@ STATE_PATH = os.path.join(DATA, "state.json")
 TG_TOKEN = os.environ.get("TG_TOKEN", "")
 OWNER = os.environ.get("TG_OWNER", "sabzrr").lstrip("@").lower()
 TG_API = "https://api.telegram.org/bot%s/%s"
+
+
+def _flag(name, default=""):
+    return os.environ.get(name, default).strip().lower() \
+        not in ("", "0", "false", "no", "off")
+
+
+# light  — без браузера: куки/токен присылаются боту в Telegram
+# browser — свой профиль браузера, вход один раз
+MODE = (os.environ.get("BOT_MODE") or "browser").strip().lower()
+HEADLESS = _flag("BOT_HEADLESS")
+IS_WINDOWS = sys.platform.startswith("win")
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36")
@@ -712,20 +725,26 @@ class BrowserHub(object):
         # системный Chrome/Edge имеют нужные библиотеки; bundled Chromium
         # на этой машине падает с SxS-ошибкой, поэтому он последним
         prefer = cfg.get("browser_channel")
+        order = ("chrome", "msedge", None) if IS_WINDOWS \
+            else (None, "chromium", "chrome")
         channels = [prefer] if prefer else []
-        channels += [c for c in ("chrome", "msedge", None) if c != prefer]
+        channels += [c for c in order if c != prefer]
+        args = ["--disable-blink-features=AutomationControlled"]
+        if not IS_WINDOWS:
+            # на сервере часто root и маленький /dev/shm
+            args += ["--no-sandbox", "--disable-dev-shm-usage"]
         last = None
         for ch in channels:
             try:
                 self.ctx = self._pw.chromium.launch_persistent_context(
                     BROWSER_DIR,
                     channel=ch,
-                    headless=False,
+                    headless=HEADLESS,
                     viewport={"width": 1280, "height": 880},
                     locale="ru-RU",
                     timezone_id="Europe/Moscow",
                     user_agent=UA,
-                    args=["--disable-blink-features=AutomationControlled"],
+                    args=args,
                 )
                 if cfg.get("browser_channel") != ch:
                     cfg["browser_channel"] = ch
@@ -1087,20 +1106,31 @@ def source_loop():
 
 
 # ------------------------------------------------------------- tg command ---
-HELP = """<b>Команды</b>
+_HELP_BASE = """<b>Команды</b>
 /status — что настроено и живо ли
-/login — открыть окна Авито и ВК для входа
 /interval 40 — период опроса, сек
 /ignore слово — не слать, если есть в имени/тексте
 /ignore — показать список, /ignore- слово — убрать
 /mute, /unmute — тишина
 /test — проверить связь
 /help — это сообщение
+"""
 
-Авито и ВК читаются через отдельный браузер бота:
-логинишься в его окне один раз, дальше всё само.
-Служебные отправители (Авито, поддержка, доставка) —
-отсекаются сами, шлю только живых людей."""
+if MODE == "browser":
+    HELP = _HELP_BASE + """/login — открыть Авито и ВК для входа
+
+Читаю через собственный браузер: логинишься в его
+окне один раз, дальше всё само."""
+else:
+    HELP = _HELP_BASE + """/avito — прислать cURL страницы мессенджера Авито
+/vk — прислать cURL или токен ВК
+/proxy avito http://... — выход в РФ для Авито
+
+Лёгкий режим, без браузера: доступ обновляешь,
+присылая боту cURL из DevTools."""
+
+HELP += ("\n\nСлужебные отправители, сообщества и свои исходящие "
+         "отсекаются — шлю только живых людей.")
 
 pending = {"await": None}
 
@@ -1354,19 +1384,59 @@ DEFAULT_SOURCES = {
 }
 
 
+def selfcheck():
+    """Проверка установки без обращения к очереди обновлений Telegram."""
+    ok = True
+    print("режим        : %s%s" % (MODE, " (headless)" if HEADLESS else ""))
+    print("каталог      : %s" % DATA)
+    print("владелец     : @%s" % OWNER)
+    if not TG_TOKEN:
+        print("✗ TG_TOKEN не задан")
+        return 1
+    r = tg("getMe")
+    if r.get("ok"):
+        print("✓ Telegram   : бот @%s" % (r.get("result") or {}).get("username"))
+    else:
+        print("✗ Telegram   : %s" % str(r)[:160])
+        ok = False
+    try:
+        os.makedirs(DATA, exist_ok=True)
+        probe = os.path.join(DATA, ".writetest")
+        with open(probe, "w") as f:
+            f.write("x")
+        os.remove(probe)
+        print("✓ запись     : ок")
+    except Exception as e:
+        print("✗ запись     : %s" % e)
+        ok = False
+    if MODE == "browser":
+        try:
+            import playwright                                  # noqa: F401
+            print("✓ playwright : установлен")
+        except Exception:
+            print("✗ playwright : не установлен (нужен для BOT_MODE=browser)")
+            ok = False
+    cid = cfg.get("chat_id")
+    print("chat_id      : %s" % (cid or "ещё нет — напиши боту /start"))
+    print("ИТОГ: %s" % ("всё готово" if ok else "есть проблемы"))
+    return 0 if ok else 1
+
+
 def main():
     if not TG_TOKEN:
-        raise SystemExit("TG_TOKEN не задан")
+        raise SystemExit("TG_TOKEN не задан (см. .env)")
     os.makedirs(DATA, exist_ok=True)
-    if not cfg.get("sources"):
+    if MODE == "browser" and not cfg.get("sources"):
         cfg["sources"] = json.loads(json.dumps(DEFAULT_SOURCES))
         cfg.setdefault("interval", 40)
         save_cfg()
-    log("старт. владелец=@%s источников=%d"
-        % (OWNER, len(cfg.get("sources") or {})))
+    log("старт. режим=%s владелец=@%s источников=%d"
+        % (MODE, OWNER, len(cfg.get("sources") or {})))
     threading.Thread(target=source_loop, daemon=True).start()
     telegram_loop()
 
 
 if __name__ == "__main__":
+    if "--selfcheck" in sys.argv:
+        sys.exit(selfcheck())
     main()

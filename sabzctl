@@ -1,0 +1,134 @@
+#!/usr/bin/env bash
+# Управление sabz-notifier. Ставится как /usr/local/bin/sabz-notifier
+set -euo pipefail
+
+APP="sabz-notifier"
+DIR="/opt/${APP}"
+SVC_USER="sabz"
+
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
+  R=$'\e[31m'; G=$'\e[32m'; Y=$'\e[33m'; B=$'\e[36m'; D=$'\e[2m'; N=$'\e[0m'; BD=$'\e[1m'
+else R=""; G=""; Y=""; B=""; D=""; N=""; BD=""; fi
+
+ok()   { printf '  %s✓%s %s\n' "$G" "$N" "$*"; }
+warn() { printf '  %s!%s %s\n' "$Y" "$N" "$*"; }
+die()  { printf '  %s✗%s %s\n' "$R" "$N" "$*" >&2; exit 1; }
+need_root() { [ "$(id -u)" = "0" ] || die "нужен root: sudo ${APP} $1"; }
+
+mode() { grep -E '^BOT_MODE=' "$DIR/.env" 2>/dev/null | cut -d= -f2- || echo light; }
+
+usage() {
+  cat <<EOF
+${BD}${APP}${N} — уведомления Avito и VK в Telegram
+
+  ${APP} ${BD}status${N}      состояние службы и самопроверка
+  ${APP} ${BD}logs${N} [-f]   логи (-f — следить вживую)
+  ${APP} ${BD}start${N} | ${BD}stop${N} | ${BD}restart${N}
+  ${APP} ${BD}selfcheck${N}   проверить токен, доступы, каталоги
+  ${APP} ${BD}login${N}       войти в Авито/ВК ${D}(режим browser)${N}
+  ${APP} ${BD}config${N}      показать настройки (токен скрыт)
+  ${APP} ${BD}uninstall${N}   удалить бота
+EOF
+}
+
+cmd_status() {
+  local act; act="$(systemctl is-active "${APP}.service" 2>/dev/null || true)"
+  if [ "$act" = "active" ]; then ok "служба работает"; else warn "служба: ${act:-нет}"; fi
+  local mem; mem="$(systemctl show "${APP}.service" -p MemoryCurrent --value 2>/dev/null || echo 0)"
+  case "$mem" in ''|*[!0-9]*) mem=0;; esac
+  [ "$mem" -gt 0 ] && printf '  %sпамять:%s %s МБ\n' "$D" "$N" "$((mem/1048576))"
+  printf '  %sрежим:%s %s\n' "$D" "$N" "$(mode)"
+  echo
+  sudo -u "$SVC_USER" env HOME="$DIR" python3 "$DIR/bot.py" --selfcheck 2>&1 | sed 's/^/  /' || true
+  echo
+  printf '  %sпоследние строки лога:%s\n' "$D" "$N"
+  journalctl -u "${APP}.service" -n 8 --no-pager -o cat 2>/dev/null | sed 's/^/    /' || true
+}
+
+cmd_login() {
+  need_root login
+  [ "$(mode)" = "browser" ] || die "вход нужен только в режиме browser (сейчас: $(mode))"
+  command -v Xvfb >/dev/null || die "нет Xvfb — переустанови с --mode browser"
+  command -v websockify >/dev/null || die "нет websockify/novnc — переустанови с --mode browser"
+
+  local NOVNC=/usr/share/novnc
+  [ -d "$NOVNC" ] || NOVNC=/usr/share/webapps/novnc
+  [ -d "$NOVNC" ] || die "не нашёл novnc"
+
+  echo "  Останавливаю бота, чтобы освободить профиль браузера..."
+  systemctl stop "${APP}.service" 2>/dev/null || true
+
+  local tmp; tmp="$(mktemp -d)"
+  cleanup() {
+    kill "${WS_PID:-}" "${VNC_PID:-}" "${X_PID:-}" "${PY_PID:-}" 2>/dev/null || true
+    rm -rf "$tmp"
+    systemctl start "${APP}.service" 2>/dev/null || true
+    echo; ok "бот снова запущен"
+  }
+  trap cleanup EXIT INT TERM
+
+  Xvfb :99 -screen 0 1280x900x24 >/dev/null 2>&1 & X_PID=$!
+  sleep 1
+  x11vnc -display :99 -localhost -nopw -forever -shared -quiet >/dev/null 2>&1 & VNC_PID=$!
+  sleep 1
+  websockify --web="$NOVNC" 127.0.0.1:6080 127.0.0.1:5900 >/dev/null 2>&1 & WS_PID=$!
+  sleep 1
+
+  cat > "$tmp/login.py" <<'PYEOF'
+import os
+from playwright.sync_api import sync_playwright
+BROWSER_DIR = os.path.join(os.environ["BOT_DIR"], "data", "browser")
+os.makedirs(BROWSER_DIR, exist_ok=True)
+UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+      "(KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36")
+with sync_playwright() as pw:
+    ctx = pw.chromium.launch_persistent_context(
+        BROWSER_DIR, headless=False,
+        viewport={"width": 1280, "height": 860},
+        locale="ru-RU", timezone_id="Europe/Moscow", user_agent=UA,
+        args=["--no-sandbox", "--disable-dev-shm-usage",
+              "--disable-blink-features=AutomationControlled"])
+    p = ctx.pages[0] if ctx.pages else ctx.new_page()
+    try: p.goto("https://www.avito.ru/profile/messenger", timeout=60000)
+    except Exception: pass
+    v = ctx.new_page()
+    try: v.goto("https://vk.ru/im", timeout=60000)
+    except Exception: pass
+    print("BROWSER_READY", flush=True)
+    while True:
+        p.wait_for_timeout(5000)
+PYEOF
+  chown -R "$SVC_USER":"$SVC_USER" "$tmp"
+  sudo -u "$SVC_USER" env DISPLAY=:99 HOME="$DIR" BOT_DIR="$DIR" \
+      python3 "$tmp/login.py" >"$tmp/out" 2>&1 & PY_PID=$!
+  for _ in $(seq 1 30); do grep -q BROWSER_READY "$tmp/out" 2>/dev/null && break; sleep 1; done
+
+  echo
+  echo "  ${BD}Браузер запущен.${N} Открой его у себя так:"
+  echo
+  echo "    1) на своём компьютере выполни:"
+  echo "       ${BD}ssh -N -L 6080:127.0.0.1:6080 $(whoami)@$(hostname -I 2>/dev/null | awk '{print $1}')${N}"
+  echo "    2) открой в браузере:  ${BD}http://localhost:6080/vnc.html${N}"
+  echo "    3) залогинься во вкладках Авито и ВК"
+  echo
+  echo "  ${D}Порт наружу не торчит — только через твой SSH-туннель.${N}"
+  echo "  Когда закончишь — нажми ${BD}Ctrl+C${N} здесь."
+  echo
+  while kill -0 "$PY_PID" 2>/dev/null; do sleep 2; done
+}
+
+case "${1:-help}" in
+  status)    cmd_status;;
+  logs)      shift; if [ "${1:-}" = "-f" ]; then journalctl -u "${APP}.service" -f -o cat
+             else journalctl -u "${APP}.service" -n "${1:-50}" --no-pager -o cat; fi;;
+  start)     need_root start; systemctl start "${APP}.service"; ok "запущен";;
+  stop)      need_root stop; systemctl stop "${APP}.service"; ok "остановлен";;
+  restart)   need_root restart; systemctl restart "${APP}.service"; ok "перезапущен";;
+  selfcheck) sudo -u "$SVC_USER" env HOME="$DIR" python3 "$DIR/bot.py" --selfcheck;;
+  login)     cmd_login;;
+  config)    sed -E 's/^(TG_TOKEN=).*/\1<скрыт>/' "$DIR/.env";;
+  uninstall) need_root uninstall
+             die "запусти install.sh --uninstall из папки репозитория";;
+  help|-h|--help) usage;;
+  *)         usage; exit 1;;
+esac
